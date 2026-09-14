@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  cyberpup-bot:
+    build: .
+    container_name: cyberpup-bot-twitch
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
