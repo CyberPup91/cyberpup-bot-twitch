@@ -23,6 +23,90 @@ const PERMISSIONS = {
     superadmin: 4
 };
 
+// ----------------------------------------------------
+// DYNAMIC VARIABLE PARSER
+// ----------------------------------------------------
+async function parseVariables(template, context) {
+    const { user, channel, args } = context;
+    const touser = args[0] ? args[0].replace('@', '') : user;
+
+    let text = template;
+
+    // 1. Basic Identity & Argument Variables
+    text = text.replace(/\${user}/g, user);
+    text = text.replace(/\${channel}/g, channel);
+    text = text.replace(/\${touser}/g, touser);
+    text = text.replace(/\${query}/g, args.join(' ') || user);
+    text = text.replace(/\${(\d+)}/g, (_, index) => args[parseInt(index, 10) - 1] || '');
+
+    // 2. Random Number Generator: ${random.1-100}
+    text = text.replace(/\${random\.(\d+)-(\d+)}/g, (_, min, max) => {
+        const low = parseInt(min, 10);
+        const high = parseInt(max, 10);
+        return Math.floor(Math.random() * (high - low + 1)) + low;
+    });
+
+    // 3. Weather API Parser with Dynamic Phrasing
+    if (text.includes('${weather')) {
+        const weatherMatches = [...text.matchAll(/\${weather(?:\s+([^}]+))?}/g)];
+
+        for (const match of weatherMatches) {
+            const tagDefault = match[1]?.trim();
+            const userArg = args.join(' ').trim();
+
+            const location = userArg || tagDefault || 'Caldwell';
+            const displayLabel = userArg ? userArg : channel;
+
+            try {
+                const url = `https://wttr.in/${encodeURIComponent(location)}?format=j1`;
+                const res = await fetch(url, {
+                    headers: { 'User-Agent': 'CyberPupBot/1.0' }
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    const condition = data.current_condition[0];
+
+                    const desc = condition.weatherDesc[0].value;
+                    const tempF = condition.temp_F;
+                    const tempC = condition.temp_C;
+                    const feelsF = condition.FeelsLikeF;
+                    const feelsC = condition.FeelsLikeC;
+                    const windMph = condition.windspeedMiles;
+
+                    const formatted = `Weather for ${displayLabel}: ${desc} ${tempF}°F (${tempC}°C) [Feels ${feelsF}°F / ${feelsC}°C] - Wind: ${windMph}mph`;
+                    text = text.replace(match[0], formatted);
+                } else {
+                    text = text.replace(match[0], `[Location '${location}' not found]`);
+                }
+            } catch (e) {
+                text = text.replace(match[0], '[Weather unavailable]');
+            }
+        }
+    } // <--- End of weather if-block
+
+    // 4. Custom API Parser
+    if (text.includes('${customapi')) {
+        const apiMatches = [...text.matchAll(/\${customapi\s+([^}]+)}/g)];
+        for (const match of apiMatches) {
+            const url = match[1].trim();
+            try {
+                const res = await fetch(url, { headers: { 'User-Agent': 'CyberPupBot/1.0' } });
+                if (res.ok) {
+                    const data = await res.text();
+                    text = text.replace(match[0], data.trim());
+                } else {
+                    text = text.replace(match[0], '[API Error]');
+                }
+            } catch (e) {
+                text = text.replace(match[0], '[API Fetch Failed]');
+            }
+        }
+    } // <--- End of customapi if-block
+
+    return text; // <--- MUST be inside parseVariables before closing brace below
+} // <--- END OF parseVariables
+
 async function main() {
     let tokenData;
     try {
@@ -99,7 +183,7 @@ async function main() {
         if (text.startsWith('$cmd ') && isModOrBroadcaster) {
             const args = text.slice(5).trim().split(/\s+/);
             const subCommand = args.shift()?.toLowerCase();
-            const trigger = args.shift()?.toLowerCase().replace('!', '');
+            const trigger = args.shift()?.toLowerCase().replace(/^[\$!]/, '');
 
             if (!subCommand || !trigger) {
                 return chatClient.say(channel, 'Usage: $cmd <add|edit|delete|options> !<trigger> [args]');
@@ -133,6 +217,24 @@ async function main() {
                 } else {
                     return chatClient.say(channel, `Command !${trigger} does not exist.`);
                 }
+            }
+
+            // $cmd show !command or $cmd info !command
+            if (subCommand === 'show' || subCommand === 'info') {
+                const cmd = db.prepare('SELECT * FROM commands WHERE LOWER(channel) = LOWER(?) AND LOWER(trigger) = LOWER(?)')
+                    .get(cleanChannel, trigger);
+
+                if (!cmd) {
+                    return chatClient.say(channel, `Command !${trigger} does not exist.`);
+                }
+
+                // Map permission integer back to human-readable string
+                const levelName = Object.keys(PERMISSIONS).find(key => PERMISSIONS[key] === cmd.userlevel) || 'everyone';
+
+                return chatClient.say(
+                    channel,
+                    `Command !${cmd.trigger} -> Response: "${cmd.response}" | Level: ${levelName} (${cmd.userlevel}) | Cooldown: ${cmd.cooldown}s`
+                );
             }
 
             // $cmd delete !command
@@ -179,33 +281,36 @@ async function main() {
         // -------------------------------------------------------------
         // GENERAL CHAT COMMAND EXECUTION
         // -------------------------------------------------------------
-        if (!text.startsWith('!')) return;
+        if (!text.startsWith('$') && !text.startsWith('!')) return;
         const cmdArgs = text.slice(1).trim().split(/\s+/);
-        const trigger = cmdArgs.shift().toLowerCase();
+        const trigger = cmdArgs.shift().toLowerCase().replace(/^[\$!]/, '');
 
-        const cmd = db.prepare('SELECT * FROM commands WHERE channel = ? AND trigger = ?').get(cleanChannel, trigger);
+        // Force lower-case lookup for both channel and trigger to prevent SQLite case-mismatches
+        const cmd = db.prepare('SELECT * FROM commands WHERE LOWER(channel) = LOWER(?) AND LOWER(trigger) = LOWER(?)')
+            .get(cleanChannel, trigger);
 
         if (cmd) {
-            // Permission Check
-            if (userLevel < cmd.userlevel) return;
+            const cmdLevel = cmd.userlevel ?? 0;
+            const cmdCooldown = cmd.cooldown ?? 5;
+            const lastUsed = cmd.last_used ?? 0;
 
-            // Cooldown Check
+            if (userLevel < cmdLevel && !isSuperAdmin) return;
+
             const now = Math.floor(Date.now() / 1000);
-            if (cmd.last_used && (now - cmd.last_used) < cmd.cooldown) return;
+            if (lastUsed > 0 && (now - lastUsed) < cmdCooldown) return;
 
-            // Update Last Used
             db.prepare('UPDATE commands SET last_used = ? WHERE id = ?').run(now, cmd.id);
 
-            // Variable Replacement Engine
-            let response = cmd.response
-                .replace(/\${user}/g, user)
-                .replace(/\${channel}/g, cleanChannel)
-                .replace(/\${touser}/g, cmdArgs[0] ? cmdArgs[0].replace('@', '') : user)
-                .replace(/\${random\.(\d+)-(\d+)}/g, (_, min, max) => {
-                    return Math.floor(Math.random() * (parseInt(max) - parseInt(min) + 1)) + parseInt(min);
-                });
+            // Parse all variables asynchronously
+            const response = await parseVariables(cmd.response || '', {
+                user,
+                channel: cleanChannel,
+                args: cmdArgs
+            });
 
-            chatClient.say(channel, response);
+            if (response) {
+                chatClient.say(channel, response);
+            }
         }
     });
 
