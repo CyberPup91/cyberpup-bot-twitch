@@ -19,7 +19,7 @@ The bot account's token needs these scopes:
 
 ## Chat commands
 
-- `$cmd add|edit|delete|show|options !<trigger> ...` (mod+) — manage custom commands
+- `$cmd add|edit|delete|show|options $<trigger> ...` (mod+) — manage custom commands (all bot commands use the `$` prefix)
 - `$announce [color] <message>` (mod+) — Helix chat announcement (colors: blue, green, orange, purple)
 - `$bot join|leave <channel>` (superadmin, home channel only) — join/part channels
 - `$raiders` / `$raids` — tonight's raiders for this channel (tracked per stream)
@@ -38,7 +38,7 @@ Streamer.bot-style flows, managed from the dashboard's Automations section. Each
 **Triggers**
 - `Keyword in chat` — message contains / equals / starts with some text (case-insensitive)
 - `Regex match` — message matches a pattern (optional `i` flag)
-- `Chat command` — someone uses `!name` (fires alongside any custom command of the same name)
+- `Chat command` — someone uses `$name` (fires alongside any custom command of the same name)
 - `Timer` — every N seconds (min 30), optionally requiring M chat messages of activity between fires; needs a specific channel
 - `Incoming raid` — someone raids this channel (EventSub; works in any joined channel, no extra scopes). Variables: `${raider}` (login), `${raider_name}` (display name), `${viewers}`. The raider counts as the "user" for conditions/cooldowns.
 - `Outgoing raid` — this channel raids someone else (EventSub). Variables: `${raid_target}` (login), `${raid_target_name}` (display name), `${viewers}`.

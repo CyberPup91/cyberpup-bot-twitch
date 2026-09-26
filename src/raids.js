@@ -87,11 +87,12 @@ export function buildShoutout(login, gameName, bio) {
 
 // Try a real announcement; fall back to a /me chat message (bot badge).
 // Returns 'announce' | 'chat'.
-export async function announceOrFallback({ apiClient, botUserId, chatClient, logEvent }, channel, text, color = 'orange') {
+export async function announceOrFallback({ apiClient, botUserId, chatClient, logEvent, noteOwnMessage }, channel, text, color = 'orange') {
     const clean = cleanChannel(channel);
     try {
         const broadcaster = await apiClient.users.getUserByName(clean);
         if (!broadcaster) throw new Error('channel not found');
+        noteOwnMessage?.(text); // register before send so the echo is dropped
         await apiClient.asUser(botUserId, async (ctx) => {
             await ctx.chat.sendAnnouncement(broadcaster.id, { message: text.slice(0, 500), color });
         });

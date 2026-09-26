@@ -10,6 +10,7 @@ import { parseAnnounceArgs } from './announce.js';
 import { parseVariables } from './variables.js';
 import { createAutomationEngine } from './automations.js';
 import { logEvent } from './log.js';
+import { noteOwnMessage, isOwnEcho } from './echoRegistry.js';
 import { startDashboard } from './dashboard.js';
 import {
     getActiveStreamId,
@@ -116,6 +117,19 @@ async function main() {
 
     const chatClient = new ChatClient({ authProvider, channels: channelsToJoin });
 
+    // ------------------------------------------------------------------
+    // Own-output echo registry (see src/echoRegistry.js).
+    // The bot runs on Ronson's main account: incoming messages from the
+    // bot's own user ID are usually Ronson typing himself and MUST be
+    // processed — only echoes of the bot's own recent output are dropped
+    // (loop protection). Wrap say/action so EVERY outgoing chat message
+    // is echo-registered, no matter which call site sends it.
+    // ------------------------------------------------------------------
+    const _botSay = chatClient.say.bind(chatClient);
+    chatClient.say = (...args) => { noteOwnMessage(args[1]); return _botSay(...args); };
+    const _botAction = chatClient.action.bind(chatClient);
+    chatClient.action = (...args) => { noteOwnMessage(args[1]); return _botAction(...args); };
+
     // Trigger → Conditions → Actions engine. io.* abstracts Twurple so the
     // engine stays testable; closures run after connect, so referencing
     // chatClient/apiClient here is safe.
@@ -125,6 +139,7 @@ async function main() {
         announce: async (cleanChannel, color, text) => {
             const broadcaster = await apiClient.users.getUserByName(cleanChannel);
             if (!broadcaster) throw new Error(`Couldn't find channel #${cleanChannel}.`);
+            noteOwnMessage(text); // register before send so the echo is dropped
             await apiClient.asUser(botUserId, async (ctx) => {
                 await ctx.chat.sendAnnouncement(broadcaster.id, {
                     message: text.slice(0, 500),
@@ -311,14 +326,18 @@ async function main() {
         const cleanChannel = channel.replace('#', '').toLowerCase();
         const cleanUser = user.toLowerCase();
 
-        // Diagnostic: log incoming $/! commands so we can tell "message never
+        // The bot runs on Ronson's own account: only drop messages that are
+        // echoes of the bot's own recent output (say/action/announcement),
+        // which Twitch sends back to chat — reprocessing those would loop.
+        // Anything else from this account was typed by Ronson himself, so
+        // process it normally (including $ commands).
+        if (botUserId && msg.userInfo.userId === botUserId && isOwnEcho(text)) return;
+
+        // Diagnostic: log incoming $ commands so we can tell "message never
         // arrived" apart from "response failed to send".
-        if (text.startsWith('$') || text.startsWith('!')) {
+        if (text.startsWith('$')) {
             logEvent('chat', `Incoming: ${user} in #${cleanChannel}: ${text.slice(0, 120)}`);
         }
-
-        // Ignore our own messages (announcements arrive back as chat messages from us)
-        if (botUserId && msg.userInfo.userId === botUserId) return;
 
         const isSuperAdmin = SUPER_ADMINS.includes(cleanUser);
         const isModOrBroadcaster = msg.userInfo.isMod || msg.userInfo.isBroadcaster || isSuperAdmin;
@@ -343,7 +362,7 @@ async function main() {
                 const info = await getStreamInfo(apiClient, cleanUser);
                 const soMsg = buildShoutout(cleanUser, info.gameName, info.bio);
                 await announceOrFallback(
-                    { apiClient, botUserId, chatClient, logEvent },
+                    { apiClient, botUserId, chatClient, logEvent, noteOwnMessage },
                     cleanChannel, soMsg, 'orange'
                 );
                 logEvent('bot', `Auto-shoutout for ${cleanUser} in #${cleanChannel}`);
@@ -397,6 +416,7 @@ async function main() {
                 // Run in the bot's user context so Twurple sends
                 // moderator_id=<bot> (not the broadcaster) and picks the
                 // bot's token, which carries moderator:manage:announcements.
+                noteOwnMessage(message); // register before send so the echo is dropped
                 await apiClient.asUser(botUserId, async (ctx) => {
                     await ctx.chat.sendAnnouncement(broadcaster.id, {
                         message: message.slice(0, 500),
@@ -440,7 +460,7 @@ async function main() {
                 const info = await getStreamInfo(apiClient, target);
                 const soMsg = buildShoutout(target, info.gameName, info.bio);
                 await announceOrFallback(
-                    { apiClient, botUserId, chatClient, logEvent },
+                    { apiClient, botUserId, chatClient, logEvent, noteOwnMessage },
                     cleanChannel, soMsg, 'orange'
                 );
                 logEvent('bot', `$so for ${target} in #${cleanChannel}`);
@@ -502,38 +522,38 @@ async function main() {
             const trigger = args.shift()?.toLowerCase().replace(/^[\$!]/, '');
 
             if (!subCommand || !trigger) {
-                return chatClient.say(channel, 'Usage: $cmd <add|edit|delete|options> !<trigger> [args]');
+                return chatClient.say(channel, 'Usage: $cmd <add|edit|delete|options> $<trigger> [args]');
             }
 
             // $cmd add !command response...
             if (subCommand === 'add' || subCommand === 'create') {
                 const response = args.join(' ');
-                if (!response) return chatClient.say(channel, `Usage: $cmd ${subCommand} !${trigger} <response>`);
+                if (!response) return chatClient.say(channel, `Usage: $cmd ${subCommand} $${trigger} <response>`);
 
                 try {
                     db.prepare(`
             INSERT INTO commands (channel, trigger, response) VALUES (?, ?, ?)
           `).run(cleanChannel, trigger, response);
-                    logEvent('command', `!${trigger} added in #${cleanChannel} by ${user}`);
-                    return chatClient.say(channel, `Successfully created command !${trigger}`);
+                    logEvent('command', `$${trigger} added in #${cleanChannel} by ${user}`);
+                    return chatClient.say(channel, `Successfully created command $${trigger}`);
                 } catch (err) {
-                    return chatClient.say(channel, `Command !${trigger} already exists. Use $cmd edit to modify it.`);
+                    return chatClient.say(channel, `Command $${trigger} already exists. Use $cmd edit to modify it.`);
                 }
             }
 
             // $cmd edit !command response...
             if (subCommand === 'edit') {
                 const response = args.join(' ');
-                if (!response) return chatClient.say(channel, `Usage: $cmd edit !${trigger} <new response>`);
+                if (!response) return chatClient.say(channel, `Usage: $cmd edit $${trigger} <new response>`);
 
                 const res = db.prepare('UPDATE commands SET response = ? WHERE channel = ? AND trigger = ?')
                     .run(response, cleanChannel, trigger);
 
                 if (res.changes > 0) {
-                    logEvent('command', `!${trigger} edited in #${cleanChannel} by ${user}`);
-                    return chatClient.say(channel, `Updated response for !${trigger}`);
+                    logEvent('command', `$${trigger} edited in #${cleanChannel} by ${user}`);
+                    return chatClient.say(channel, `Updated response for $${trigger}`);
                 } else {
-                    return chatClient.say(channel, `Command !${trigger} does not exist.`);
+                    return chatClient.say(channel, `Command $${trigger} does not exist.`);
                 }
             }
 
@@ -543,7 +563,7 @@ async function main() {
                     .get(cleanChannel, trigger);
 
                 if (!cmd) {
-                    return chatClient.say(channel, `Command !${trigger} does not exist.`);
+                    return chatClient.say(channel, `Command $${trigger} does not exist.`);
                 }
 
                 // Map permission integer back to human-readable string
@@ -551,7 +571,7 @@ async function main() {
 
                 return chatClient.say(
                     channel,
-                    `Command !${cmd.trigger} -> Response: "${cmd.response}" | Level: ${levelName} (${cmd.userlevel}) | Cooldown: ${cmd.cooldown}s`
+                    `Command $${cmd.trigger} -> Response: "${cmd.response}" | Level: ${levelName} (${cmd.userlevel}) | Cooldown: ${cmd.cooldown}s`
                 );
             }
 
@@ -561,10 +581,10 @@ async function main() {
                     .run(cleanChannel, trigger);
 
                 if (res.changes > 0) {
-                    logEvent('command', `!${trigger} deleted in #${cleanChannel} by ${user}`);
-                    return chatClient.say(channel, `Deleted command !${trigger}`);
+                    logEvent('command', `$${trigger} deleted in #${cleanChannel} by ${user}`);
+                    return chatClient.say(channel, `Deleted command $${trigger}`);
                 } else {
-                    return chatClient.say(channel, `Command !${trigger} not found.`);
+                    return chatClient.say(channel, `Command $${trigger} not found.`);
                 }
             }
 
@@ -574,7 +594,7 @@ async function main() {
                 const value = args.shift()?.toLowerCase();
 
                 if (!property || !value) {
-                    return chatClient.say(channel, `Usage: $cmd options !${trigger} <userlevel|cooldown> <value>`);
+                    return chatClient.say(channel, `Usage: $cmd options $${trigger} <userlevel|cooldown> <value>`);
                 }
 
                 if (property === 'userlevel') {
@@ -583,8 +603,8 @@ async function main() {
                     }
                     db.prepare('UPDATE commands SET userlevel = ? WHERE channel = ? AND trigger = ?')
                         .run(PERMISSIONS[value], cleanChannel, trigger);
-                    logEvent('command', `!${trigger} level -> ${value} in #${cleanChannel} (by ${user})`);
-                    return chatClient.say(channel, `Set userlevel for !${trigger} to ${value}`);
+                    logEvent('command', `$${trigger} level -> ${value} in #${cleanChannel} (by ${user})`);
+                    return chatClient.say(channel, `Set userlevel for $${trigger} to ${value}`);
                 }
 
                 if (property === 'cooldown') {
@@ -592,8 +612,8 @@ async function main() {
                     if (isNaN(seconds)) return chatClient.say(channel, 'Cooldown must be a number in seconds.');
                     db.prepare('UPDATE commands SET cooldown = ? WHERE channel = ? AND trigger = ?')
                         .run(seconds, cleanChannel, trigger);
-                    logEvent('command', `!${trigger} cooldown -> ${seconds}s in #${cleanChannel} (by ${user})`);
-                    return chatClient.say(channel, `Set cooldown for !${trigger} to ${seconds}s`);
+                    logEvent('command', `$${trigger} cooldown -> ${seconds}s in #${cleanChannel} (by ${user})`);
+                    return chatClient.say(channel, `Set cooldown for $${trigger} to ${seconds}s`);
                 }
             }
             return;
@@ -602,13 +622,14 @@ async function main() {
         // -------------------------------------------------------------
         // AUTOMATIONS: trigger → conditions → actions
         // Runs for every non-management message (fire-and-forget so action
-        // delays never block command responses). The bot's own messages are
-        // already filtered above, so automation output can't loop.
+        // delays never block command responses). Echoes of the bot's own
+        // output are already filtered above via the echo registry, so
+        // automation output can't loop.
         // -------------------------------------------------------------
         {
             const words = text.trim().split(/\s+/);
-            const commandName = (text.startsWith('!') || text.startsWith('$'))
-                ? words[0].slice(1).toLowerCase().replace(/^[$!]/, '') || null
+            const commandName = text.startsWith('$')
+                ? words[0].slice(1).toLowerCase().replace(/^\$/, '') || null
                 : null;
             engine.processMessage({
                 channel,
@@ -625,9 +646,9 @@ async function main() {
         // -------------------------------------------------------------
         // GENERAL CHAT COMMAND EXECUTION
         // -------------------------------------------------------------
-        if (!text.startsWith('$') && !text.startsWith('!')) return;
+        if (!text.startsWith('$')) return;
         const cmdArgs = text.slice(1).trim().split(/\s+/);
-        const trigger = cmdArgs.shift().toLowerCase().replace(/^[\$!]/, '');
+        const trigger = cmdArgs.shift().toLowerCase().replace(/^\$/, '');
 
         // Force lower-case lookup for both channel and trigger to prevent SQLite case-mismatches
         const cmd = db.prepare('SELECT * FROM commands WHERE LOWER(channel) = LOWER(?) AND LOWER(trigger) = LOWER(?)')
@@ -644,7 +665,7 @@ async function main() {
             if (lastUsed > 0 && (now - lastUsed) < cmdCooldown) return;
 
             db.prepare('UPDATE commands SET last_used = ? WHERE id = ?').run(now, cmd.id);
-            logEvent('command', `!${trigger} by ${user} in #${cleanChannel}`);
+            logEvent('command', `$${trigger} by ${user} in #${cleanChannel}`);
 
             // Parse all variables asynchronously
             const response = await parseVariables(cmd.response || '', {
