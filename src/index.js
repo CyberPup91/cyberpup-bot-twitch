@@ -1,9 +1,11 @@
 import { RefreshingAuthProvider } from '@twurple/auth';
 import { ChatClient } from '@twurple/chat';
+import { ApiClient } from '@twurple/api';
 import fs from 'fs/promises';
 import path from 'path';
 import dotenv from 'dotenv';
 import db from './db.js';
+import { parseAnnounceArgs } from './announce.js';
 
 dotenv.config();
 
@@ -131,7 +133,20 @@ async function main() {
         console.log('[Auth] Refreshed access token saved to disk.');
     });
 
-    await authProvider.addUserForToken(tokenData, ['chat']);
+    await authProvider.addUserForToken(tokenData, ['chat', 'moderator:manage:announcements']);
+
+    const apiClient = new ApiClient({ authProvider });
+
+    // Identify the bot account so we can ignore our own messages.
+    // (Helix announcements echo back into chat as our own PRIVMSGs.)
+    let botUserId = null;
+    try {
+        const me = await apiClient.users.getAuthenticatedUser();
+        botUserId = me.id;
+        console.log(`[Bot] Authenticated as ${me.displayName}`);
+    } catch (e) {
+        console.warn('[Bot] Could not resolve bot identity; self-message guard disabled.');
+    }
 
     // Load channels
     const rows = db.prepare('SELECT name FROM channels').all();
@@ -146,6 +161,10 @@ async function main() {
     chatClient.onMessage(async (channel, user, text, msg) => {
         const cleanChannel = channel.replace('#', '').toLowerCase();
         const cleanUser = user.toLowerCase();
+
+        // Ignore our own messages (announcements arrive back as chat messages from us)
+        if (botUserId && msg.userInfo.userId === botUserId) return;
+
         const isSuperAdmin = SUPER_ADMINS.includes(cleanUser);
         const isModOrBroadcaster = msg.userInfo.isMod || msg.userInfo.isBroadcaster || isSuperAdmin;
         const isHomeChannel = HOME_CHANNELS.includes(cleanChannel);
@@ -175,6 +194,39 @@ async function main() {
                 chatClient.part(target);
                 return chatClient.say(channel, `Left #${target}.`);
             }
+        }
+
+        // -------------------------------------------------------------
+        // TIER 1.5: ANNOUNCEMENTS ($announce)
+        // Sends a Helix chat announcement. Requires the bot account to be
+        // a moderator in the channel and the
+        // moderator:manage:announcements scope on its token.
+        // Usage: $announce [color] <message>
+        // Colors: blue, green, orange, purple (default: primary)
+        // -------------------------------------------------------------
+        if (text.startsWith('$announce ') && isModOrBroadcaster) {
+            const { color, message } = parseAnnounceArgs(text);
+
+            if (!message) {
+                return chatClient.say(channel, 'Usage: $announce [color] <message> (colors: blue, green, orange, purple)');
+            }
+
+            try {
+                const broadcaster = await apiClient.users.getUserByName(cleanChannel);
+                if (!broadcaster) {
+                    return chatClient.say(channel, `Couldn't find channel #${cleanChannel}.`);
+                }
+                await apiClient.chat.sendAnnouncement(broadcaster.id, {
+                    message: message.slice(0, 500),
+                    color
+                });
+                console.log(`[Announce] #${cleanChannel} (${color}): ${message}`);
+            } catch (e) {
+                console.warn('[Announce] failed:', e?.message || e);
+                return chatClient.say(channel,
+                    `Couldn't send that announcement -- is this account a mod in #${cleanChannel}?`);
+            }
+            return;
         }
 
         // -------------------------------------------------------------
