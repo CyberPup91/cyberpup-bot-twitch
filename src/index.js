@@ -37,6 +37,19 @@ const TOKEN_PATH = path.join(process.cwd(), 'data', 'tokens.json');
 const SUPER_ADMINS = (process.env.SUPER_ADMINS || 'ronson,cyberpupbot').toLowerCase().split(',');
 const HOME_CHANNELS = (process.env.HOME_CHANNELS || 'cyberpupbot').toLowerCase().split(',');
 
+// Never die silently: surface unhandled promise rejections in the dashboard
+// log (and keep the process alive) instead of crashing the container.
+process.on('unhandledRejection', (reason) => {
+    const msg = reason?.message || String(reason);
+    console.error('[Fatal] Unhandled rejection:', msg);
+    try { logEvent('error', `Unhandled rejection: ${msg}`); } catch { /* ignore */ }
+});
+process.on('uncaughtException', (err) => {
+    const msg = err?.message || String(err);
+    console.error('[Fatal] Uncaught exception:', msg);
+    try { logEvent('error', `Uncaught exception: ${msg}`); } catch { /* ignore */ }
+});
+
 // User Level Hierarchy
 const PERMISSIONS = {
     everyone: 0,
@@ -129,7 +142,15 @@ async function main() {
     // ---- EventSub (raids) -------------------------------------------------
     // channel.raid needs no OAuth scopes, so the bot's existing token works
     // for every joined channel, even where it is only a moderator.
-    const eventSub = new EventSubWsListener({ apiClient });
+    //
+    // keepalive_timeout_seconds=60: Twitch's default 10s keepalive window is
+    // prone to spurious client-side timeouts (twurple/twurple#666), which
+    // cause a reconnect + re-subscribe storm every ~12s. 60s (client times
+    // out at 72s) is far more tolerant of network jitter.
+    const eventSub = new EventSubWsListener({
+        apiClient,
+        url: 'wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=60'
+    });
     const raidSubs = new Map(); // cleanChannel -> EventSubSubscription[]
 
     function handleRaidEvent(direction, event) {
@@ -218,9 +239,22 @@ async function main() {
             console.log('[EventSub] WebSocket connected.');
             logEvent('eventsub', 'WebSocket connected');
         });
+        eventSub.onUserSocketDisconnect((userId, error) => {
+            const reason = error?.message || error || 'no reason given';
+            console.warn(`[EventSub] WebSocket disconnected: ${reason}`);
+            logEvent('eventsub', `WebSocket disconnected: ${reason}`);
+        });
     } catch (e) {
         console.warn('[EventSub] Failed to start listener:', e?.message || e);
     }
+
+    // Surface chat connection drops in the dashboard log — a dead chat
+    // connection means no commands respond, and otherwise it's invisible.
+    chatClient.onDisconnect((manually, reason) => {
+        const msg = `Chat disconnected${manually ? ' (manual)' : ''}: ${reason?.message || reason || 'no reason given'}`;
+        console.warn(`[Chat] ${msg}`);
+        logEvent('chat', msg);
+    });
 
     chatClient.onMessage(async (channel, user, text, msg) => {
         const cleanChannel = channel.replace('#', '').toLowerCase();
@@ -585,7 +619,7 @@ async function main() {
 
     await chatClient.connect();
     console.log('[Bot] CyberPupBot connected to Twitch Chat.');
-    logEvent('bot', 'Connected to Twitch chat');
+    logEvent('bot', `Connected to Twitch chat (channels: ${channelsToJoin.join(', ') || 'none'})`);
 
     // EventSub raid subscriptions for every joined channel.
     for (const ch of channelsToJoin) {
