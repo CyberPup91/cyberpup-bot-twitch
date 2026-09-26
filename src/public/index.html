@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CyberPup Bot Dashboard</title>
+<style>
+  :root { --bg: #12141a; --card: #1b1e27; --line: #2a2f3d; --txt: #e8eaf0; --dim: #9aa0b4; --acc: #7c6cf0; --ok: #3ecf6f; --bad: #ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 1.15rem; margin: 0; }
+  #status { color: var(--dim); font-size: .85rem; }
+  #live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; margin-right: 6px; }
+  #live-dot.on { background: var(--ok); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px; display: grid; gap: 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 1rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: #12141a; color: var(--txt); padding: 8px 10px; }
+  input[type="number"] { width: 84px; }
+  button { background: var(--acc); border-color: var(--acc); cursor: pointer; font-weight: 600; }
+  button.ghost { background: transparent; border-color: var(--line); font-weight: 400; }
+  button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; background: #12141a; border: 1px solid var(--line); border-radius: 999px; padding: 6px 8px 6px 14px; font-size: .9rem; }
+  .chip button { padding: 2px 9px; font-size: .8rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--dim); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  td input, td select { width: 100%; padding: 6px 8px; font-size: .85rem; }
+  td .trig { font-family: ui-monospace, monospace; color: var(--acc); font-weight: 700; white-space: nowrap; }
+  td .chan { color: var(--dim); font-size: .8rem; white-space: nowrap; }
+  .actions { white-space: nowrap; }
+  .actions button { padding: 6px 10px; font-size: .8rem; margin-right: 6px; }
+  #log { height: 320px; overflow-y: auto; background: #0d0f14; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, monospace; font-size: .8rem; line-height: 1.5; }
+  #log .lt { color: var(--dim); margin-right: 8px; }
+  #log .tag { display: inline-block; min-width: 74px; margin-right: 8px; font-weight: 700; }
+  #log .tag.bot { color: var(--acc); } #log .tag.command { color: #6fc3ff; }
+  #log .tag.channel { color: var(--ok); } #log .tag.announce { color: #ffb84d; }
+  #log .tag.error { color: var(--bad); } #log .tag.__hello { color: var(--dim); }
+  .muted { color: var(--dim); font-size: .85rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  label { font-size: .8rem; color: var(--dim); display: block; margin-bottom: 4px; }
+  .field { display: flex; flex-direction: column; }
+  #add-form { display: grid; grid-template-columns: 160px 160px 1fr 150px 110px auto; gap: 8px; align-items: end; margin-top: 14px; }
+  @media (max-width: 900px) { #add-form { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐶 CyberPup Bot</h1>
+  <span id="live-dot" title="live log connection"></span>
+  <span id="status" class="muted">connecting…</span>
+</header>
+<main>
+  <div class="grid2">
+    <section class="card">
+      <h2>Channels</h2>
+      <div class="chips" id="channels"></div>
+      <div class="row">
+        <input id="join-name" placeholder="channel name" autocomplete="off">
+        <button id="join-btn">Join</button>
+      </div>
+      <p class="muted">Channels persist in the database and are rejoined on restart.</p>
+    </section>
+    <section class="card">
+      <h2>Bot</h2>
+      <div id="bot-info" class="muted">—</div>
+      <p class="muted">Announcement commands: <code>$announce [color] &lt;message&gt;</code> in chat (mod+). Colors: blue, green, orange, purple.</p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Custom commands</h2>
+    <div class="row" style="margin-bottom:12px">
+      <label for="filter-channel" class="muted">Channel</label>
+      <select id="filter-channel"><option value="">All channels</option></select>
+      <button class="ghost" id="refresh-btn">↻ Refresh</button>
+    </div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Trigger</th><th>Channel</th><th>Response</th><th>Level</th><th>Cooldown</th><th></th></tr></thead>
+      <tbody id="cmd-rows"></tbody>
+    </table>
+    </div>
+    <div id="add-form">
+      <div class="field"><label>Channel</label><select id="add-channel"></select></div>
+      <div class="field"><label>Trigger (without !)</label><input id="add-trigger" placeholder="hug" autocomplete="off"></div>
+      <div class="field"><label>Response (supports ${user} ${touser} ${query} ${weather} ${customapi …})</label><input id="add-response" placeholder="hugs ${touser}!" autocomplete="off"></div>
+      <div class="field"><label>Level</label><select id="add-level"></select></div>
+      <div class="field"><label>Cooldown (s)</label><input id="add-cooldown" type="number" min="0" value="5"></div>
+      <div><button id="add-btn">Add</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Live log <button class="ghost" id="clear-log" style="float:right">Clear</button></h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let LEVELS = [];
+
+async function api(path, opts) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+async function loadStatus() {
+  try {
+    const s = await api('/api/status');
+    $('status').textContent = `uptime ${fmtUptime(s.uptimeSec)} · ${s.channels} channel${s.channels === 1 ? '' : 's'} · ${s.commands} command${s.commands === 1 ? '' : 's'}`;
+    $('bot-info').innerHTML = `Logged in as <strong>${esc(s.botName)}</strong>`;
+  } catch { $('status').textContent = 'status unavailable'; }
+}
+
+async function loadChannels() {
+  const channels = await api('/api/channels');
+  $('channels').innerHTML = channels.length
+    ? channels.map((c) => `<span class="chip">#${esc(c.name)}<button class="danger" data-part="${esc(c.name)}">part</button></span>`).join('')
+    : '<span class="muted">No channels yet.</span>';
+  const opts = channels.map((c) => `<option value="${esc(c.name)}">#${esc(c.name)}</option>`).join('');
+  $('filter-channel').innerHTML = `<option value="">All channels</option>${opts}`;
+  $('add-channel').innerHTML = opts || '<option value="">—</option>';
+  document.querySelectorAll('[data-part]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`Part #${b.dataset.part}?`)) return;
+      await api(`/api/channels/${encodeURIComponent(b.dataset.part)}`, { method: 'DELETE' });
+      refreshAll();
+    };
+  });
+}
+
+function levelOptions(selected) {
+  return LEVELS.map((l) => `<option value="${l.value}"${l.value === selected ? ' selected' : ''}>${esc(l.name)}</option>`).join('');
+}
+
+async function loadCommands() {
+  const filter = $('filter-channel').value;
+  const rows = await api('/api/commands' + (filter ? `?channel=${encodeURIComponent(filter)}` : ''));
+  $('cmd-rows').innerHTML = rows.length ? rows.map((r) => `
+    <tr data-id="${r.id}">
+      <td class="trig">!${esc(r.trigger)}</td>
+      <td class="chan">#${esc(r.channel)}</td>
+      <td><input data-f="response" value="${esc(r.response)}"></td>
+      <td><select data-f="userlevel">${levelOptions(r.userlevel ?? 0)}</select></td>
+      <td><input data-f="cooldown" type="number" min="0" value="${r.cooldown ?? 5}"></td>
+      <td class="actions"><button data-save>Save</button><button class="danger" data-del>Delete</button></td>
+    </tr>`).join('')
+    : `<tr><td colspan="6" class="muted">No commands${filter ? ` in #${esc(filter)}` : ''} yet.</td></tr>`;
+  document.querySelectorAll('#cmd-rows tr[data-id]').forEach((tr) => {
+    const id = tr.dataset.id;
+    tr.querySelector('[data-save]').onclick = async () => {
+      const body = {};
+      tr.querySelectorAll('[data-f]').forEach((el) => { body[el.dataset.f] = el.value; });
+      await api(`/api/commands/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+      tr.querySelector('[data-save]').textContent = 'Saved ✓';
+      setTimeout(() => { tr.querySelector('[data-save]').textContent = 'Save'; }, 1200);
+    };
+    tr.querySelector('[data-del]').onclick = async () => {
+      if (!confirm('Delete this command?')) return;
+      await api(`/api/commands/${id}`, { method: 'DELETE' });
+      loadCommands(); loadStatus();
+    };
+  });
+}
+
+async function refreshAll() { await loadStatus(); await loadChannels(); await loadCommands(); }
+
+function addLog(entry) {
+  const el = $('log');
+  const div = document.createElement('div');
+  const time = (entry.t || '').slice(11, 19);
+  div.innerHTML = `<span class="lt">${esc(time)}</span><span class="tag ${esc(entry.type)}">[${esc(entry.type)}]</span><span>${esc(entry.message)}</span>`;
+  el.appendChild(div);
+  while (el.children.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function connectLog() {
+  const src = new EventSource('/api/events');
+  src.onopen = () => $('live-dot').classList.add('on');
+  src.onerror = () => $('live-dot').classList.remove('on');
+  src.onmessage = (ev) => {
+    try { addLog(JSON.parse(ev.data)); } catch { /* ignore malformed */ }
+  };
+}
+
+async function init() {
+  const meta = await api('/api/meta');
+  LEVELS = meta.levels;
+  $('add-level').innerHTML = levelOptions(0);
+  $('join-btn').onclick = async () => {
+    const name = $('join-name').value.trim();
+    if (!name) return;
+    await api('/api/channels', { method: 'POST', body: JSON.stringify({ name }) });
+    $('join-name').value = '';
+    refreshAll();
+  };
+  $('join-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('join-btn').click(); });
+  $('filter-channel').onchange = loadCommands;
+  $('refresh-btn').onclick = refreshAll;
+  $('clear-log').onclick = () => { $('log').innerHTML = ''; };
+  $('add-btn').onclick = async () => {
+    const body = {
+      channel: $('add-channel').value,
+      trigger: $('add-trigger').value,
+      response: $('add-response').value,
+      userlevel: $('add-level').value,
+      cooldown: $('add-cooldown').value
+    };
+    if (!body.channel || !body.trigger.trim() || !body.response.trim()) { alert('Channel, trigger and response are required.'); return; }
+    await api('/api/commands', { method: 'POST', body: JSON.stringify(body) });
+    $('add-trigger').value = ''; $('add-response').value = '';
+    loadCommands(); loadStatus();
+  };
+  await refreshAll();
+  connectLog();
+  setInterval(loadStatus, 15000);
+}
+
+init().catch((e) => { $('status').textContent = 'failed to load: ' + e.message; });
+</script>
+</body>
+</html>

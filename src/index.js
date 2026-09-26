@@ -6,6 +6,8 @@ import path from 'path';
 import dotenv from 'dotenv';
 import db from './db.js';
 import { parseAnnounceArgs } from './announce.js';
+import { logEvent } from './log.js';
+import { startDashboard } from './dashboard.js';
 
 dotenv.config();
 
@@ -110,6 +112,7 @@ async function parseVariables(template, context) {
 } // <--- END OF parseVariables
 
 async function main() {
+    const startedAt = Date.now();
     let tokenData;
     try {
         const raw = await fs.readFile(TOKEN_PATH, 'utf-8');
@@ -140,10 +143,13 @@ async function main() {
     // Identify the bot account so we can ignore our own messages.
     // (Helix announcements echo back into chat as our own PRIVMSGs.)
     let botUserId = null;
+    let botDisplayName = 'unknown';
     try {
         const me = await apiClient.users.getAuthenticatedUser();
         botUserId = me.id;
+        botDisplayName = me.displayName;
         console.log(`[Bot] Authenticated as ${me.displayName}`);
+        logEvent('bot', `Authenticated as ${me.displayName}`);
     } catch (e) {
         console.warn('[Bot] Could not resolve bot identity; self-message guard disabled.');
     }
@@ -187,11 +193,13 @@ async function main() {
             if (action === 'join' && target) {
                 db.prepare('INSERT OR IGNORE INTO channels (name) VALUES (?)').run(target);
                 await chatClient.join(target);
+                logEvent('channel', `Joined #${target} (requested by ${user})`);
                 return chatClient.say(channel, `Joined #${target}!`);
             }
             if (action === 'leave' && target) {
                 db.prepare('DELETE FROM channels WHERE name = ?').run(target);
                 chatClient.part(target);
+                logEvent('channel', `Left #${target} (requested by ${user})`);
                 return chatClient.say(channel, `Left #${target}.`);
             }
         }
@@ -221,8 +229,10 @@ async function main() {
                     color
                 });
                 console.log(`[Announce] #${cleanChannel} (${color}): ${message}`);
+                logEvent('announce', `#${cleanChannel} (${color}): ${message}`);
             } catch (e) {
                 console.warn('[Announce] failed:', e?.message || e);
+                logEvent('error', `Announce failed in #${cleanChannel}: ${e?.message || e}`);
                 return chatClient.say(channel,
                     `Couldn't send that announcement -- is this account a mod in #${cleanChannel}?`);
             }
@@ -250,6 +260,7 @@ async function main() {
                     db.prepare(`
             INSERT INTO commands (channel, trigger, response) VALUES (?, ?, ?)
           `).run(cleanChannel, trigger, response);
+                    logEvent('command', `!${trigger} added in #${cleanChannel} by ${user}`);
                     return chatClient.say(channel, `Successfully created command !${trigger}`);
                 } catch (err) {
                     return chatClient.say(channel, `Command !${trigger} already exists. Use $cmd edit to modify it.`);
@@ -265,6 +276,7 @@ async function main() {
                     .run(response, cleanChannel, trigger);
 
                 if (res.changes > 0) {
+                    logEvent('command', `!${trigger} edited in #${cleanChannel} by ${user}`);
                     return chatClient.say(channel, `Updated response for !${trigger}`);
                 } else {
                     return chatClient.say(channel, `Command !${trigger} does not exist.`);
@@ -295,6 +307,7 @@ async function main() {
                     .run(cleanChannel, trigger);
 
                 if (res.changes > 0) {
+                    logEvent('command', `!${trigger} deleted in #${cleanChannel} by ${user}`);
                     return chatClient.say(channel, `Deleted command !${trigger}`);
                 } else {
                     return chatClient.say(channel, `Command !${trigger} not found.`);
@@ -316,6 +329,7 @@ async function main() {
                     }
                     db.prepare('UPDATE commands SET userlevel = ? WHERE channel = ? AND trigger = ?')
                         .run(PERMISSIONS[value], cleanChannel, trigger);
+                    logEvent('command', `!${trigger} level -> ${value} in #${cleanChannel} (by ${user})`);
                     return chatClient.say(channel, `Set userlevel for !${trigger} to ${value}`);
                 }
 
@@ -324,6 +338,7 @@ async function main() {
                     if (isNaN(seconds)) return chatClient.say(channel, 'Cooldown must be a number in seconds.');
                     db.prepare('UPDATE commands SET cooldown = ? WHERE channel = ? AND trigger = ?')
                         .run(seconds, cleanChannel, trigger);
+                    logEvent('command', `!${trigger} cooldown -> ${seconds}s in #${cleanChannel} (by ${user})`);
                     return chatClient.say(channel, `Set cooldown for !${trigger} to ${seconds}s`);
                 }
             }
@@ -352,6 +367,7 @@ async function main() {
             if (lastUsed > 0 && (now - lastUsed) < cmdCooldown) return;
 
             db.prepare('UPDATE commands SET last_used = ? WHERE id = ?').run(now, cmd.id);
+            logEvent('command', `!${trigger} by ${user} in #${cleanChannel}`);
 
             // Parse all variables asynchronously
             const response = await parseVariables(cmd.response || '', {
@@ -366,8 +382,23 @@ async function main() {
         }
     });
 
+    // Web dashboard: runs in this process and shares the DB, so dashboard
+    // changes (commands, channels) take effect immediately, no restart needed.
+    try {
+        startDashboard({
+            db,
+            chatClient,
+            info: { botName: botDisplayName, startedAt },
+            port: parseInt(process.env.DASHBOARD_PORT || '3000', 10),
+            host: process.env.DASHBOARD_HOST || '127.0.0.1'
+        });
+    } catch (e) {
+        console.warn('[Dashboard] Failed to start:', e.message);
+    }
+
     await chatClient.connect();
     console.log('[Bot] CyberPupBot connected to Twitch Chat.');
+    logEvent('bot', 'Connected to Twitch chat');
 }
 
 main().catch(console.error);
