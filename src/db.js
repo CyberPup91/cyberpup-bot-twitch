@@ -35,6 +35,40 @@ db.exec(`
     last_fired INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
   );
+
+  -- Raid tracking (per channel, per stream session)
+  CREATE TABLE IF NOT EXISTS raids (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    stream_id TEXT,
+    raider_login TEXT NOT NULL,
+    viewers INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
+
+  -- Last known stream ID per channel (drives per-stream raid clearing)
+  CREATE TABLE IF NOT EXISTS channel_streams (
+    channel TEXT PRIMARY KEY,
+    stream_id TEXT
+  );
+
+  -- Auto-shoutout friends (per channel)
+  CREATE TABLE IF NOT EXISTS autoso_friends (
+    channel TEXT NOT NULL,
+    username TEXT NOT NULL,
+    added_by TEXT,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (channel, username)
+  );
+
+  -- Who already got an auto-shoutout this stream (per channel)
+  CREATE TABLE IF NOT EXISTS autoso_log (
+    channel TEXT NOT NULL,
+    stream_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (channel, stream_id, username)
+  );
 `);
 
 // Migration Helper: Explicitly add missing columns if upgrading an existing DB

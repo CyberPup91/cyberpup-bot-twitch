@@ -22,6 +22,12 @@ The bot account's token needs these scopes:
 - `$cmd add|edit|delete|show|options !<trigger> ...` (mod+) — manage custom commands
 - `$announce [color] <message>` (mod+) — Helix chat announcement (colors: blue, green, orange, purple)
 - `$bot join|leave <channel>` (superadmin, home channel only) — join/part channels
+- `$raiders` / `$raids` — tonight's raiders for this channel (tracked per stream)
+- `$so <username>` (mod+) — shoutout: orange announcement with last game + bio, `/me` fallback
+- `$autoso <add|del|list> [@username]` (mod+) — auto-shoutout friends; friends get an automatic shoutout on their first chat each stream
+- `$ending` / `$wrapup` / `$raidout` (mod+) — end-of-stream flow: sends `!raid`, `!subraid`, posts the raiders summary, and pings the Discord webhook (if configured)
+
+Optional integrations (env vars, all off unless set): `DISCORD_WEBHOOK_URL` for the `$ending` raiders post; `GOOGLE_FORM_ID` + `FORM_ENTRY_*` to log incoming raids to a Google Sheet; `GOOGLE_FORM_ID_OUT` + `FORM_ENTRY_OUT_*` for outgoing raids.
 
 Custom command responses support `${user}`, `${touser}`, `${channel}`, `${query}`, `${1}..${N}`, `${random.1-100}`, `${weather [location]}`, and `${customapi <url>}`.
 

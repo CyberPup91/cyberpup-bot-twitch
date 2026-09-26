@@ -11,6 +11,22 @@ import { parseVariables } from './variables.js';
 import { createAutomationEngine } from './automations.js';
 import { logEvent } from './log.js';
 import { startDashboard } from './dashboard.js';
+import {
+    getActiveStreamId,
+    recordRaid,
+    getRaidersText,
+    getStreamInfo,
+    buildShoutout,
+    announceOrFallback,
+    addAutoSoFriend,
+    removeAutoSoFriend,
+    getAutoSoFriends,
+    isAutoSoFriend,
+    hasBeenAutoShoutedOut,
+    recordAutoShoutout,
+    logRaidToSheet,
+    postDiscordRaiders,
+} from './raids.js';
 
 dotenv.config();
 
@@ -149,6 +165,20 @@ async function main() {
             };
         }
         logEvent('eventsub', `Raid ${direction === 'raid_incoming' ? 'in' : 'out'}: #${ctx.cleanChannel} (${viewers} viewers)`);
+        if (direction === 'raid_incoming') {
+            // Background integrations (Python parity): record for $raiders
+            // and log to Google Sheets. Shoutout/welcome messages are left
+            // to the user's raid_incoming automations.
+            getActiveStreamId(apiClient, db, ctx.cleanChannel)
+                .then((streamId) => {
+                    recordRaid(db, ctx.cleanChannel, streamId, ctx.extra.raider, viewers);
+                    logEvent('eventsub', `Recorded raid from ${ctx.extra.raider} (${viewers} viewers) in #${ctx.cleanChannel}`);
+                })
+                .catch((e) => console.warn('[EventSub] raid record failed:', e?.message || e));
+            logRaidToSheet('in', ctx.extra.raider, viewers, logEvent);
+        } else {
+            logRaidToSheet('out', ctx.extra.raid_target, viewers, logEvent);
+        }
         engine.processEvent(ctx, automationIo).catch((e) => console.warn('[EventSub]', e?.message || e));
     }
 
@@ -209,6 +239,25 @@ async function main() {
         if (msg.userInfo.isMod) userLevel = PERMISSIONS.moderator;
         if (msg.userInfo.isBroadcaster) userLevel = PERMISSIONS.broadcaster;
         if (isSuperAdmin) userLevel = PERMISSIONS.superadmin;
+
+        // -------------------------------------------------------------
+        // AUTO-SHOUTOUT: friend chatted and hasn't been shouted out
+        // this stream -> orange announcement with game + bio.
+        // (Fire-and-forget; never blocks command handling below.)
+        // -------------------------------------------------------------
+        if (isAutoSoFriend(db, cleanChannel, cleanUser)) {
+            getActiveStreamId(apiClient, db, cleanChannel).then(async (streamId) => {
+                if (!streamId || hasBeenAutoShoutedOut(db, cleanChannel, streamId, cleanUser)) return;
+                recordAutoShoutout(db, cleanChannel, streamId, cleanUser);
+                const info = await getStreamInfo(apiClient, cleanUser);
+                const soMsg = buildShoutout(cleanUser, info.gameName, info.bio);
+                await announceOrFallback(
+                    { apiClient, botUserId, chatClient, logEvent },
+                    cleanChannel, soMsg, 'orange'
+                );
+                logEvent('bot', `Auto-shoutout for ${cleanUser} in #${cleanChannel}`);
+            }).catch((e) => console.warn('[AutoSO]', e?.message || e));
+        }
 
         // -------------------------------------------------------------
         // TIER 1: GLOBAL SUPER-ADMIN COMMANDS ($bot join / $bot leave)
@@ -272,6 +321,85 @@ async function main() {
                     `Couldn't send that announcement -- is this account a mod in #${cleanChannel}?`);
             }
             return;
+        }
+
+        // -------------------------------------------------------------
+        // TIER 1.6: RAID & SHOUTOUT COMMANDS (Python-bot parity)
+        // $raiders / $so / $autoso / $ending — per channel.
+        // -------------------------------------------------------------
+        const lcText = text.toLowerCase();
+
+        // $raiders / $raids (everyone): tonight's raiders for this channel.
+        if (lcText === '$raiders' || lcText === '$raids') {
+            const raidersText = getRaidersText(db, cleanChannel);
+            if (!raidersText) {
+                return chatClient.say(channel, 'No raids recorded this stream yet!');
+            }
+            return chatClient.say(channel,
+                `Huge thanks to tonight's raiders! Check out their channels: ${raidersText}`.slice(0, 500));
+        }
+
+        if (isModOrBroadcaster) {
+            // $so <username>: orange announcement shoutout with last game + bio.
+            if (lcText.startsWith('$so ') || lcText === '$so') {
+                const target = text.slice(3).trim().split(/\s+/)[0]?.toLowerCase().replace(/^@/, '');
+                if (!target) {
+                    return chatClient.say(channel, 'Usage: $so <username>');
+                }
+                const info = await getStreamInfo(apiClient, target);
+                const soMsg = buildShoutout(target, info.gameName, info.bio);
+                await announceOrFallback(
+                    { apiClient, botUserId, chatClient, logEvent },
+                    cleanChannel, soMsg, 'orange'
+                );
+                logEvent('bot', `$so for ${target} in #${cleanChannel}`);
+                return;
+            }
+
+            // $autoso <add|del|list> [@username]: auto-shoutout friends.
+            if (lcText.startsWith('$autoso')) {
+                const args = text.slice(7).trim().split(/\s+/).filter(Boolean);
+                const sub = (args[0] || '').toLowerCase();
+                if (sub === 'list' || !sub) {
+                    const friends = getAutoSoFriends(db, cleanChannel);
+                    return chatClient.say(channel, friends.length
+                        ? `Auto-shoutout friends: ${friends.join(', ')}`
+                        : 'No friends configured for auto-shoutouts yet!');
+                }
+                if (sub === 'add' || sub === 'append') {
+                    const target = (args[1] || '').toLowerCase().replace(/^@/, '');
+                    if (!target) return chatClient.say(channel, 'Usage: $autoso add @username');
+                    addAutoSoFriend(db, cleanChannel, target, cleanUser);
+                    return chatClient.say(channel, `Added ${target} to the auto-shoutout friends list!`);
+                }
+                if (sub === 'del' || sub === 'delete' || sub === 'remove') {
+                    const target = (args[1] || '').toLowerCase().replace(/^@/, '');
+                    if (!target) return chatClient.say(channel, 'Usage: $autoso del @username');
+                    const removed = removeAutoSoFriend(db, cleanChannel, target);
+                    return chatClient.say(channel, removed
+                        ? `Removed ${target} from the auto-shoutout friends list!`
+                        : `${target} wasn't on the auto-shoutout list.`);
+                }
+                return chatClient.say(channel, 'Usage: $autoso <add|del|list> [@username]');
+            }
+
+            // $ending / $wrapup / $raidout: end-of-stream raid-out flow.
+            if (lcText === '$ending' || lcText === '$wrapup' || lcText === '$raidout') {
+                await chatClient.say(channel, '!raid');
+                await new Promise((r) => setTimeout(r, 3000));
+                await chatClient.say(channel, '!subraid');
+                await new Promise((r) => setTimeout(r, 3000));
+                const raidersText = getRaidersText(db, cleanChannel);
+                if (raidersText) {
+                    await chatClient.say(channel,
+                        `Huge thanks to tonight's raiders! Check out their channels: ${raidersText}`.slice(0, 500));
+                } else {
+                    await chatClient.say(channel, 'No raids recorded this stream yet!');
+                }
+                await postDiscordRaiders(db, cleanChannel, logEvent);
+                logEvent('bot', `$ending flow ran in #${cleanChannel}`);
+                return;
+            }
         }
 
         // -------------------------------------------------------------
