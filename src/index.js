@@ -140,17 +140,61 @@ async function main() {
     };
 
     // ---- EventSub (raids) -------------------------------------------------
-    // channel.raid needs no OAuth scopes, so the bot's existing token works
+    // channel.raid needs no OAuth scope, so the bot's existing token works
     // for every joined channel, even where it is only a moderator.
     //
+    // Twurple quirk: EventSubChannelRaidSubscription hardcodes authUserId to
+    // the *broadcaster* being monitored, so subscription creation tries to
+    // use the broadcaster's token (which we don't have) and fails with
+    // "no token was found". Twitch itself accepts these subscriptions from
+    // any user token (the Python bot does exactly that), so we override the
+    // subscription to use the bot's own user context instead. Without this,
+    // no subscription is ever created, Twitch closes the socket with
+    // [4003] connection unused after 10s, and it reconnect-loops forever.
+    class BotEventSubListener extends EventSubWsListener {
+        _genericSubscribe(clazz, handler, client, ...params) {
+            if (!clazz.prototype.__botAuthPatched) {
+                const botId = this.__botUserId;
+                // 1) Route the socket + transport through the bot's user
+                //    context instead of the broadcaster's.
+                Object.defineProperty(clazz.prototype, 'authUserId', {
+                    get() { return botId; },
+                    configurable: true
+                });
+                // 2) createSubscription() is also called with the broadcaster
+                //    as the user context (HelixEventSubApi passes it through),
+                //    so reimplement _subscribe with the bot as the user.
+                //    The condition still targets the broadcaster — Twitch
+                //    accepts channel.raid subscriptions from any user token.
+                clazz.prototype._subscribe = async function () {
+                    const transport = await this._getTransportOptions();
+                    const conditionKey = this._direction === 'from'
+                        ? 'from_broadcaster_user_id'
+                        : 'to_broadcaster_user_id';
+                    return await this._client._apiClient.eventSub.createSubscription(
+                        'channel.raid',
+                        '1',
+                        { [conditionKey]: this._userId },
+                        transport,
+                        botId
+                    );
+                };
+                Object.defineProperty(clazz.prototype, '__botAuthPatched', {
+                    value: true, configurable: true
+                });
+            }
+            return super._genericSubscribe(clazz, handler, client, ...params);
+        }
+    }
+    //
     // keepalive_timeout_seconds=60: Twitch's default 10s keepalive window is
-    // prone to spurious client-side timeouts (twurple/twurple#666), which
-    // cause a reconnect + re-subscribe storm every ~12s. 60s (client times
-    // out at 72s) is far more tolerant of network jitter.
-    const eventSub = new EventSubWsListener({
+    // prone to spurious client-side timeouts (twurple/twurple#666). 60s
+    // (client times out at 72s) is far more tolerant of network jitter.
+    const eventSub = new BotEventSubListener({
         apiClient,
         url: 'wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=60'
     });
+    eventSub.__botUserId = botUserId;
     const raidSubs = new Map(); // cleanChannel -> EventSubSubscription[]
 
     function handleRaidEvent(direction, event) {
@@ -255,10 +299,23 @@ async function main() {
         console.warn(`[Chat] ${msg}`);
         logEvent('chat', msg);
     });
+    // Twitch can reject our outgoing messages (ban, block, rate limit...).
+    // Without this, sends fail silently and commands look dead.
+    chatClient.onMessageFailed((channel, reason) => {
+        const msg = `Message to #${channel} rejected by Twitch: ${reason}`;
+        console.warn(`[Chat] ${msg}`);
+        logEvent('chat', msg);
+    });
 
     chatClient.onMessage(async (channel, user, text, msg) => {
         const cleanChannel = channel.replace('#', '').toLowerCase();
         const cleanUser = user.toLowerCase();
+
+        // Diagnostic: log incoming $/! commands so we can tell "message never
+        // arrived" apart from "response failed to send".
+        if (text.startsWith('$') || text.startsWith('!')) {
+            logEvent('chat', `Incoming: ${user} in #${cleanChannel}: ${text.slice(0, 120)}`);
+        }
 
         // Ignore our own messages (announcements arrive back as chat messages from us)
         if (botUserId && msg.userInfo.userId === botUserId) return;
