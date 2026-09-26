@@ -243,6 +243,10 @@ function renderTriggerConfig(cfg = {}) {
     html = `<div class="field"><label>Every (seconds, min 30)</label><input id="atc-interval" type="number" min="30" value="${esc(cfg.interval_sec ?? 300)}"></div>
       <div class="field"><label>Min chat messages between fires</label><input id="atc-minmsgs" type="number" min="0" value="${esc(cfg.min_messages ?? 0)}"></div>
       <p class="muted">Timers need a specific channel (not "All channels").</p>`;
+  } else if (type === 'raid_incoming') {
+    html = `<p class="muted">Fires when someone raids this channel. Use <b>\${raider}</b> (login), <b>\${raider_name}</b> (display name) and <b>\${viewers}</b> in your actions. The raider counts as the "user" for conditions and per-user cooldowns.</p>`;
+  } else if (type === 'raid_outgoing') {
+    html = `<p class="muted">Fires when this channel raids someone else. Use <b>\${raid_target}</b> (login), <b>\${raid_target_name}</b> (display name) and <b>\${viewers}</b> in your actions.</p>`;
   }
   $('auto-trigger-config').innerHTML = html;
 }

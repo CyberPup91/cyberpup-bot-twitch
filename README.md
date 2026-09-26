@@ -34,6 +34,8 @@ Streamer.bot-style flows, managed from the dashboard's Automations section. Each
 - `Regex match` — message matches a pattern (optional `i` flag)
 - `Chat command` — someone uses `!name` (fires alongside any custom command of the same name)
 - `Timer` — every N seconds (min 30), optionally requiring M chat messages of activity between fires; needs a specific channel
+- `Incoming raid` — someone raids this channel (EventSub; works in any joined channel, no extra scopes). Variables: `${raider}` (login), `${raider_name}` (display name), `${viewers}`. The raider counts as the "user" for conditions/cooldowns.
+- `Outgoing raid` — this channel raids someone else (EventSub). Variables: `${raid_target}` (login), `${raid_target_name}` (display name), `${viewers}`.
 
 **Conditions** (message triggers only; all must pass)
 - Minimum user level (everyone → superadmin)

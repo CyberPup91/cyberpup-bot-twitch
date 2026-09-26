@@ -1,6 +1,7 @@
 import { RefreshingAuthProvider } from '@twurple/auth';
 import { ChatClient } from '@twurple/chat';
 import { ApiClient } from '@twurple/api';
+import { EventSubWsListener } from '@twurple/eventsub-ws';
 import fs from 'fs/promises';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -109,6 +110,88 @@ async function main() {
         }
     };
 
+    // ---- EventSub (raids) -------------------------------------------------
+    // channel.raid needs no OAuth scopes, so the bot's existing token works
+    // for every joined channel, even where it is only a moderator.
+    const eventSub = new EventSubWsListener({ apiClient });
+    const raidSubs = new Map(); // cleanChannel -> EventSubSubscription[]
+
+    function handleRaidEvent(direction, event) {
+        const viewers = event.viewers ?? 0;
+        let ctx;
+        if (direction === 'raid_incoming') {
+            const raider = (event.raidingBroadcasterName || '').toLowerCase();
+            const cleanChannel = (event.raidedBroadcasterName || '').toLowerCase();
+            ctx = {
+                channel: `#${cleanChannel}`, cleanChannel,
+                user: raider, cleanUser: raider, userLevel: PERMISSIONS.everyone,
+                text: '', args: [], commandName: null,
+                eventType: 'raid_incoming',
+                extra: {
+                    raider,
+                    raider_name: event.raidingBroadcasterDisplayName || raider,
+                    viewers
+                }
+            };
+        } else {
+            const target = (event.raidedBroadcasterName || '').toLowerCase();
+            const cleanChannel = (event.raidingBroadcasterName || '').toLowerCase();
+            ctx = {
+                channel: `#${cleanChannel}`, cleanChannel,
+                user: '', cleanUser: '', userLevel: PERMISSIONS.everyone,
+                text: '', args: [], commandName: null,
+                eventType: 'raid_outgoing',
+                extra: {
+                    raid_target: target,
+                    raid_target_name: event.raidedBroadcasterDisplayName || target,
+                    viewers
+                }
+            };
+        }
+        logEvent('eventsub', `Raid ${direction === 'raid_incoming' ? 'in' : 'out'}: #${ctx.cleanChannel} (${viewers} viewers)`);
+        engine.processEvent(ctx, automationIo).catch((e) => console.warn('[EventSub]', e?.message || e));
+    }
+
+    async function subscribeRaidEvents(channelName) {
+        const clean = channelName.toLowerCase().replace(/^#/, '');
+        if (raidSubs.has(clean)) return;
+        try {
+            const broadcaster = await apiClient.users.getUserByName(clean);
+            if (!broadcaster) {
+                console.warn(`[EventSub] Couldn't resolve #${clean}, skipping raid subscriptions.`);
+                return;
+            }
+            const subs = [
+                eventSub.onChannelRaidTo(broadcaster.id, (e) => handleRaidEvent('raid_incoming', e)),
+                eventSub.onChannelRaidFrom(broadcaster.id, (e) => handleRaidEvent('raid_outgoing', e)),
+            ];
+            raidSubs.set(clean, subs);
+            console.log(`[EventSub] Raid detection active for #${clean}.`);
+            logEvent('eventsub', `Raid detection active for #${clean}`);
+        } catch (e) {
+            console.warn(`[EventSub] Failed to subscribe raids for #${clean}: ${e?.message || e}`);
+            logEvent('error', `EventSub subscribe failed for #${clean}: ${e?.message || e}`);
+        }
+    }
+
+    function unsubscribeRaidEvents(channelName) {
+        const clean = channelName.toLowerCase().replace(/^#/, '');
+        for (const sub of raidSubs.get(clean) || []) {
+            try { sub.stop(); } catch { /* ignore */ }
+        }
+        raidSubs.delete(clean);
+    }
+
+    try {
+        eventSub.start();
+        eventSub.onUserSocketConnect(() => {
+            console.log('[EventSub] WebSocket connected.');
+            logEvent('eventsub', 'WebSocket connected');
+        });
+    } catch (e) {
+        console.warn('[EventSub] Failed to start listener:', e?.message || e);
+    }
+
     chatClient.onMessage(async (channel, user, text, msg) => {
         const cleanChannel = channel.replace('#', '').toLowerCase();
         const cleanUser = user.toLowerCase();
@@ -138,12 +221,14 @@ async function main() {
             if (action === 'join' && target) {
                 db.prepare('INSERT OR IGNORE INTO channels (name) VALUES (?)').run(target);
                 await chatClient.join(target);
+                await subscribeRaidEvents(target);
                 logEvent('channel', `Joined #${target} (requested by ${user})`);
                 return chatClient.say(channel, `Joined #${target}!`);
             }
             if (action === 'leave' && target) {
                 db.prepare('DELETE FROM channels WHERE name = ?').run(target);
                 chatClient.part(target);
+                unsubscribeRaidEvents(target);
                 logEvent('channel', `Left #${target} (requested by ${user})`);
                 return chatClient.say(channel, `Left #${target}.`);
             }
@@ -363,7 +448,8 @@ async function main() {
             chatClient,
             info: { botName: botDisplayName, startedAt },
             port: parseInt(process.env.DASHBOARD_PORT || '3000', 10),
-            host: process.env.DASHBOARD_HOST || '127.0.0.1'
+            host: process.env.DASHBOARD_HOST || '127.0.0.1',
+            eventHooks: { subscribe: subscribeRaidEvents, unsubscribe: unsubscribeRaidEvents }
         });
     } catch (e) {
         console.warn('[Dashboard] Failed to start:', e.message);
@@ -372,6 +458,11 @@ async function main() {
     await chatClient.connect();
     console.log('[Bot] CyberPupBot connected to Twitch Chat.');
     logEvent('bot', 'Connected to Twitch chat');
+
+    // EventSub raid subscriptions for every joined channel.
+    for (const ch of channelsToJoin) {
+        await subscribeRaidEvents(ch);
+    }
 
     // Automation timers (timer trigger type), evaluated every 15s.
     setInterval(() => {

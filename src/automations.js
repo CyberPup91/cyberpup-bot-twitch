@@ -11,6 +11,12 @@
 //   regex:   { pattern, flags }            (flags: '' or 'i')
 //   command: { name }                      (message is !name or $name)
 //   timer:   { interval_sec (>=30), min_messages (>=0) }  (requires a specific channel)
+//   raid_incoming: {}  (EventSub channel.raid into this channel; no config)
+//   raid_outgoing: {}  (EventSub channel.raid from this channel; no config)
+//
+// Event variables available to raid actions:
+//   raid_incoming: ${raider} ${raider_name} ${viewers}  (also ${user} = raider login)
+//   raid_outgoing: ${raid_target} ${raid_target_name} ${viewers}
 //
 // Conditions (message triggers only):
 //   { min_level: 0-4, allow_users: [...], deny_users: [...] }
@@ -25,6 +31,8 @@ export const TRIGGER_TYPES = [
     { id: 'regex', name: 'Regex match' },
     { id: 'command', name: 'Chat command' },
     { id: 'timer', name: 'Timer' },
+    { id: 'raid_incoming', name: 'Incoming raid' },
+    { id: 'raid_outgoing', name: 'Outgoing raid' },
 ];
 
 export const ACTION_TYPES = [
@@ -78,6 +86,10 @@ export function summarizeTrigger(auto) {
             if (cfg.min_messages) parts.push(`≥${cfg.min_messages} msgs`);
             return parts.join(', ');
         }
+        case 'raid_incoming':
+            return 'raid into this channel';
+        case 'raid_outgoing':
+            return 'raid from this channel';
         default:
             return auto.trigger_type;
     }
@@ -96,6 +108,10 @@ function cleanNameList(v) {
 function validateTriggerConfig(type, cfg) {
     const errors = [];
     const c = { ...(cfg || {}) };
+
+    if (type === 'raid_incoming' || type === 'raid_outgoing') {
+        return { errors, config: {} }; // no configuration needed
+    }
 
     if (type === 'keyword') {
         c.text = String(c.text || '').trim();
@@ -229,6 +245,10 @@ export function createAutomationEngine({ db, parseVariables, logEvent }) {
             }
             case 'command':
                 return !!ctx.commandName && ctx.commandName === cfg.name;
+            case 'raid_incoming':
+                return ctx.eventType === 'raid_incoming';
+            case 'raid_outgoing':
+                return ctx.eventType === 'raid_outgoing';
             default:
                 return false;
         }
@@ -263,7 +283,7 @@ export function createAutomationEngine({ db, parseVariables, logEvent }) {
     }
 
     async function runActions(auto, ctx, io) {
-        const vctx = { user: ctx.user, channel: ctx.cleanChannel, args: ctx.args || [] };
+        const vctx = { user: ctx.user, channel: ctx.cleanChannel, args: ctx.args || [], extra: ctx.extra };
         for (const action of auto.actions) {
             if (action.type === 'message') {
                 const text = await parseVariables(action.text, vctx);
@@ -292,6 +312,30 @@ export function createAutomationEngine({ db, parseVariables, logEvent }) {
                 markFired(auto);
                 noteUserCooldown(auto, ctx);
                 logEvent('automation', `"${auto.name}" fired in #${ctx.cleanChannel} (triggered by ${ctx.user})`);
+            } catch (e) {
+                logEvent('error', `Automation "${auto.name}" failed: ${e?.message || e}`);
+            }
+        }
+    }
+
+    // Process one EventSub event (raid in/out) against all event-triggered automations.
+    // ctx: { channel ('#name'), cleanChannel, user, cleanUser, userLevel,
+    //        eventType: 'raid_incoming'|'raid_outgoing', extra: {...}, text: '', args: [] }
+    async function processEvent(ctx, io) {
+        const describe = ctx.eventType === 'raid_incoming'
+            ? `raid from ${ctx.extra?.raider || 'unknown'} (${ctx.extra?.viewers ?? 0} viewers)`
+            : `raid to ${ctx.extra?.raid_target || 'unknown'} (${ctx.extra?.viewers ?? 0} viewers)`;
+        for (const auto of getEnabled()) {
+            if (auto.trigger_type !== 'raid_incoming' && auto.trigger_type !== 'raid_outgoing') continue;
+            if (auto.channel !== '*' && auto.channel !== ctx.cleanChannel) continue;
+            if (!matchTrigger(auto, ctx)) continue;
+            if (!checkConditions(auto, ctx)) continue;
+            if (!checkCooldowns(auto, ctx)) continue;
+            try {
+                await runActions(auto, ctx, io);
+                markFired(auto);
+                noteUserCooldown(auto, ctx);
+                logEvent('automation', `"${auto.name}" fired in #${ctx.cleanChannel} (${describe})`);
             } catch (e) {
                 logEvent('error', `Automation "${auto.name}" failed: ${e?.message || e}`);
             }
@@ -332,5 +376,5 @@ export function createAutomationEngine({ db, parseVariables, logEvent }) {
         }
     }
 
-    return { processMessage, processTimers, getEnabled, matchTrigger, checkConditions, summarizeTrigger };
+    return { processMessage, processEvent, processTimers, getEnabled, matchTrigger, checkConditions, summarizeTrigger };
 }

@@ -6,7 +6,7 @@
 //   ${customapi <url>}
 
 export async function parseVariables(template, context) {
-    const { user, channel, args } = context;
+    const { user, channel, args, extra } = context;
     const touser = args[0] ? args[0].replace('@', '') : user;
 
     let text = template;
@@ -17,6 +17,15 @@ export async function parseVariables(template, context) {
     text = text.replace(/\${touser}/g, touser);
     text = text.replace(/\${query}/g, args.join(' ') || user);
     text = text.replace(/\${(\d+)}/g, (_, index) => args[parseInt(index, 10) - 1] || '');
+
+    // 1b. Event variables (e.g. ${raider}, ${viewers}, ${raid_target}).
+    // Runs after the built-ins so built-in names always win on collision.
+    if (extra && typeof extra === 'object') {
+        for (const [key, value] of Object.entries(extra)) {
+            if (!/^[A-Za-z0-9_]+$/.test(key)) continue;
+            text = text.replace(new RegExp('\\${' + key + '}', 'g'), String(value ?? ''));
+        }
+    }
 
     // 2. Random Number Generator: ${random.1-100}
     text = text.replace(/\${random\.(\d+)-(\d+)}/g, (_, min, max) => {

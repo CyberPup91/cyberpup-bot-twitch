@@ -37,7 +37,7 @@ function parseCooldown(v) {
     return Number.isNaN(n) ? 5 : Math.max(0, n);
 }
 
-export function startDashboard({ db, chatClient, info = {}, port = 3000, host = '127.0.0.1' }) {
+export function startDashboard({ db, chatClient, info = {}, port = 3000, host = '127.0.0.1', eventHooks = {} }) {
     const app = express();
     app.use(express.json());
 
@@ -79,6 +79,7 @@ export function startDashboard({ db, chatClient, info = {}, port = 3000, host = 
         } catch (e) {
             // Not connected yet: the channel is in the DB and will be joined on next start.
         }
+        try { await eventHooks.subscribe?.(name); } catch { /* raid subs optional */ }
         logEvent('channel', `Joined #${name} (via dashboard)`);
         res.status(201).json({ name });
     });
@@ -88,6 +89,7 @@ export function startDashboard({ db, chatClient, info = {}, port = 3000, host = 
         const r = db.prepare('DELETE FROM channels WHERE name = ?').run(name);
         if (r.changes === 0) return res.status(404).json({ error: 'channel not found' });
         try { chatClient.part(name); } catch { /* ignore */ }
+        try { eventHooks.unsubscribe?.(name); } catch { /* ignore */ }
         logEvent('channel', `Left #${name} (via dashboard)`);
         res.json({ ok: true });
     });
