@@ -144,14 +144,23 @@ async function main() {
     // (Helix announcements echo back into chat as our own PRIVMSGs.)
     let botUserId = null;
     let botDisplayName = 'unknown';
-    try {
-        const me = await apiClient.users.getAuthenticatedUser();
-        botUserId = me.id;
-        botDisplayName = me.displayName;
-        console.log(`[Bot] Authenticated as ${me.displayName}`);
-        logEvent('bot', `Authenticated as ${me.displayName}`);
-    } catch (e) {
-        console.warn('[Bot] Could not resolve bot identity; self-message guard disabled.');
+    // Resolve our own identity (used for the dashboard and the self-message
+    // guard). Retried because a single Helix blip at startup shouldn't
+    // permanently disable it.
+    for (let attempt = 1; attempt <= 3 && !botUserId; attempt++) {
+        try {
+            const me = await apiClient.users.getAuthenticatedUser();
+            botUserId = me.id;
+            botDisplayName = me.displayName;
+            console.log(`[Bot] Authenticated as ${me.displayName}`);
+            logEvent('bot', `Authenticated as ${me.displayName}`);
+        } catch (e) {
+            console.warn(`[Bot] Could not resolve bot identity (attempt ${attempt}/3): ${e.message}`);
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 5000));
+        }
+    }
+    if (!botUserId) {
+        console.warn('[Bot] Giving up on identity lookup; self-message guard disabled.');
     }
 
     // Load channels
