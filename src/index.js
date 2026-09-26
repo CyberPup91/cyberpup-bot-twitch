@@ -136,31 +136,26 @@ async function main() {
         console.log('[Auth] Refreshed access token saved to disk.');
     });
 
-    await authProvider.addUserForToken(tokenData, ['chat', 'moderator:manage:announcements']);
+    // addUserForToken validates the token and returns its owner's user ID.
+    // (The second arg is intents, not scopes — the announce scope only needs
+    // to be granted on the token itself at OAuth time.)
+    const botUserId = await authProvider.addUserForToken(tokenData, ['chat']);
 
     const apiClient = new ApiClient({ authProvider });
 
-    // Identify the bot account so we can ignore our own messages.
-    // (Helix announcements echo back into chat as our own PRIVMSGs.)
-    let botUserId = null;
+    // Resolve our display name for the dashboard. The user ID above is
+    // authoritative, so this lookup is cosmetic-only: if it fails, the
+    // dashboard shows "unknown" but the self-message guard still works.
     let botDisplayName = 'unknown';
-    // Resolve our own identity (used for the dashboard and the self-message
-    // guard). Retried because a single Helix blip at startup shouldn't
-    // permanently disable it.
-    for (let attempt = 1; attempt <= 3 && !botUserId; attempt++) {
-        try {
-            const me = await apiClient.users.getAuthenticatedUser();
-            botUserId = me.id;
+    try {
+        const me = await apiClient.users.getUserById(botUserId);
+        if (me) {
             botDisplayName = me.displayName;
-            console.log(`[Bot] Authenticated as ${me.displayName}`);
+            console.log(`[Bot] Authenticated as ${me.displayName} (${botUserId})`);
             logEvent('bot', `Authenticated as ${me.displayName}`);
-        } catch (e) {
-            console.warn(`[Bot] Could not resolve bot identity (attempt ${attempt}/3): ${e.message}`);
-            if (attempt < 3) await new Promise((r) => setTimeout(r, 5000));
         }
-    }
-    if (!botUserId) {
-        console.warn('[Bot] Giving up on identity lookup; self-message guard disabled.');
+    } catch (e) {
+        console.warn(`[Bot] Could not fetch bot display name: ${e.message}`);
     }
 
     // Load channels
@@ -233,9 +228,14 @@ async function main() {
                 if (!broadcaster) {
                     return chatClient.say(channel, `Couldn't find channel #${cleanChannel}.`);
                 }
-                await apiClient.chat.sendAnnouncement(broadcaster.id, {
-                    message: message.slice(0, 500),
-                    color
+                // Run in the bot's user context so Twurple sends
+                // moderator_id=<bot> (not the broadcaster) and picks the
+                // bot's token, which carries moderator:manage:announcements.
+                await apiClient.asUser(botUserId, async (ctx) => {
+                    await ctx.chat.sendAnnouncement(broadcaster.id, {
+                        message: message.slice(0, 500),
+                        color
+                    });
                 });
                 console.log(`[Announce] #${cleanChannel} (${color}): ${message}`);
                 logEvent('announce', `#${cleanChannel} (${color}): ${message}`);
