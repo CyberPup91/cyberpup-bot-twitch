@@ -24,3 +24,24 @@ The bot account's token needs these scopes:
 - `$bot join|leave <channel>` (superadmin, home channel only) — join/part channels
 
 Custom command responses support `${user}`, `${touser}`, `${channel}`, `${query}`, `${1}..${N}`, `${random.1-100}`, `${weather [location]}`, and `${customapi <url>}`.
+
+## Automations (trigger → conditions → actions)
+
+Streamer.bot-style flows, managed from the dashboard's Automations section. Each automation has a **trigger**, optional **conditions**, and an ordered list of **actions**.
+
+**Triggers**
+- `Keyword in chat` — message contains / equals / starts with some text (case-insensitive)
+- `Regex match` — message matches a pattern (optional `i` flag)
+- `Chat command` — someone uses `!name` (fires alongside any custom command of the same name)
+- `Timer` — every N seconds (min 30), optionally requiring M chat messages of activity between fires; needs a specific channel
+
+**Conditions** (message triggers only; all must pass)
+- Minimum user level (everyone → superadmin)
+- Only / never these users
+
+**Actions** (run in order)
+- `Send chat message` — variables supported (`${user}`, `${touser}`, …)
+- `Send announcement` — bot must be a mod in the channel
+- `Wait` — pause between actions (up to 60s)
+
+Cooldowns: per-automation (everyone) and per-user. Automation fires are logged to the live log. The bot ignores its own messages, so automation output can't trigger other automations.

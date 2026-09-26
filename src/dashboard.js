@@ -9,6 +9,14 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getRecentEvents, subscribe, logEvent } from './log.js';
+import {
+    validateAutomation,
+    rowToAutomation,
+    summarizeTrigger,
+    TRIGGER_TYPES,
+    ACTION_TYPES,
+    ANNOUNCE_COLORS,
+} from './automations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,15 +50,18 @@ export function startDashboard({ db, chatClient, info = {}, port = 3000, host = 
     app.get('/api/status', (req, res) => {
         let channels = 0;
         let commands = 0;
+        let automations = 0;
         try {
             channels = db.prepare('SELECT COUNT(*) AS n FROM channels').get().n;
             commands = db.prepare('SELECT COUNT(*) AS n FROM commands').get().n;
+            automations = db.prepare('SELECT COUNT(*) AS n FROM automations').get().n;
         } catch { /* db not ready yet */ }
         res.json({
             botName: info.botName || 'unknown',
             uptimeSec: Math.floor((Date.now() - (info.startedAt || Date.now())) / 1000),
             channels,
-            commands
+            commands,
+            automations
         });
     });
 
@@ -126,6 +137,64 @@ export function startDashboard({ db, chatClient, info = {}, port = 3000, host = 
         const r = db.prepare('DELETE FROM commands WHERE id = ?').run(req.params.id);
         if (r.changes === 0) return res.status(404).json({ error: 'command not found' });
         logEvent('command', `Deleted command #${req.params.id} (via dashboard)`);
+        res.json({ ok: true });
+    });
+
+    // ---- automations (trigger → conditions → actions) ----
+    app.get('/api/automation-meta', (req, res) => {
+        res.json({
+            trigger_types: TRIGGER_TYPES,
+            action_types: ACTION_TYPES,
+            announce_colors: ANNOUNCE_COLORS,
+            levels: LEVEL_NAMES.map((name, value) => ({ name, value }))
+        });
+    });
+
+    app.get('/api/automations', (req, res) => {
+        const rows = db.prepare('SELECT * FROM automations ORDER BY name').all().map(rowToAutomation);
+        res.json(rows.map((a) => ({ ...a, trigger_summary: summarizeTrigger(a) })));
+    });
+
+    app.post('/api/automations', (req, res) => {
+        const { ok, errors, automation } = validateAutomation(req.body);
+        if (!ok) return res.status(400).json({ error: errors.join('; ') });
+        const r = db.prepare(`
+            INSERT INTO automations
+                (name, enabled, channel, trigger_type, trigger_config, conditions, actions, cooldown_sec, user_cooldown_sec)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            automation.name, automation.enabled, automation.channel, automation.trigger_type,
+            JSON.stringify(automation.trigger_config), JSON.stringify(automation.conditions),
+            JSON.stringify(automation.actions), automation.cooldown_sec, automation.user_cooldown_sec
+        );
+        logEvent('automation', `Created automation "${automation.name}" (via dashboard)`);
+        res.status(201).json({ id: Number(r.lastInsertRowid) });
+    });
+
+    app.put('/api/automations/:id', (req, res) => {
+        const { ok, errors, automation } = validateAutomation(req.body);
+        if (!ok) return res.status(400).json({ error: errors.join('; ') });
+        const r = db.prepare(`
+            UPDATE automations SET
+                name = ?, enabled = ?, channel = ?, trigger_type = ?,
+                trigger_config = ?, conditions = ?, actions = ?,
+                cooldown_sec = ?, user_cooldown_sec = ?
+            WHERE id = ?
+        `).run(
+            automation.name, automation.enabled, automation.channel, automation.trigger_type,
+            JSON.stringify(automation.trigger_config), JSON.stringify(automation.conditions),
+            JSON.stringify(automation.actions), automation.cooldown_sec, automation.user_cooldown_sec,
+            req.params.id
+        );
+        if (r.changes === 0) return res.status(404).json({ error: 'automation not found' });
+        logEvent('automation', `Updated automation "${automation.name}" (via dashboard)`);
+        res.json({ ok: true });
+    });
+
+    app.delete('/api/automations/:id', (req, res) => {
+        const r = db.prepare('DELETE FROM automations WHERE id = ?').run(req.params.id);
+        if (r.changes === 0) return res.status(404).json({ error: 'automation not found' });
+        logEvent('automation', `Deleted automation #${req.params.id} (via dashboard)`);
         res.json({ ok: true });
     });
 

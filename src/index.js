@@ -6,6 +6,8 @@ import path from 'path';
 import dotenv from 'dotenv';
 import db from './db.js';
 import { parseAnnounceArgs } from './announce.js';
+import { parseVariables } from './variables.js';
+import { createAutomationEngine } from './automations.js';
 import { logEvent } from './log.js';
 import { startDashboard } from './dashboard.js';
 
@@ -26,90 +28,6 @@ const PERMISSIONS = {
     broadcaster: 3,
     superadmin: 4
 };
-
-// ----------------------------------------------------
-// DYNAMIC VARIABLE PARSER
-// ----------------------------------------------------
-async function parseVariables(template, context) {
-    const { user, channel, args } = context;
-    const touser = args[0] ? args[0].replace('@', '') : user;
-
-    let text = template;
-
-    // 1. Basic Identity & Argument Variables
-    text = text.replace(/\${user}/g, user);
-    text = text.replace(/\${channel}/g, channel);
-    text = text.replace(/\${touser}/g, touser);
-    text = text.replace(/\${query}/g, args.join(' ') || user);
-    text = text.replace(/\${(\d+)}/g, (_, index) => args[parseInt(index, 10) - 1] || '');
-
-    // 2. Random Number Generator: ${random.1-100}
-    text = text.replace(/\${random\.(\d+)-(\d+)}/g, (_, min, max) => {
-        const low = parseInt(min, 10);
-        const high = parseInt(max, 10);
-        return Math.floor(Math.random() * (high - low + 1)) + low;
-    });
-
-    // 3. Weather API Parser with Dynamic Phrasing
-    if (text.includes('${weather')) {
-        const weatherMatches = [...text.matchAll(/\${weather(?:\s+([^}]+))?}/g)];
-
-        for (const match of weatherMatches) {
-            const tagDefault = match[1]?.trim();
-            const userArg = args.join(' ').trim();
-
-            const location = userArg || tagDefault || 'Caldwell';
-            const displayLabel = userArg ? userArg : channel;
-
-            try {
-                const url = `https://wttr.in/${encodeURIComponent(location)}?format=j1`;
-                const res = await fetch(url, {
-                    headers: { 'User-Agent': 'CyberPupBot/1.0' }
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    const condition = data.current_condition[0];
-
-                    const desc = condition.weatherDesc[0].value;
-                    const tempF = condition.temp_F;
-                    const tempC = condition.temp_C;
-                    const feelsF = condition.FeelsLikeF;
-                    const feelsC = condition.FeelsLikeC;
-                    const windMph = condition.windspeedMiles;
-
-                    const formatted = `Weather for ${displayLabel}: ${desc} ${tempF}°F (${tempC}°C) [Feels ${feelsF}°F / ${feelsC}°C] - Wind: ${windMph}mph`;
-                    text = text.replace(match[0], formatted);
-                } else {
-                    text = text.replace(match[0], `[Location '${location}' not found]`);
-                }
-            } catch (e) {
-                text = text.replace(match[0], '[Weather unavailable]');
-            }
-        }
-    } // <--- End of weather if-block
-
-    // 4. Custom API Parser
-    if (text.includes('${customapi')) {
-        const apiMatches = [...text.matchAll(/\${customapi\s+([^}]+)}/g)];
-        for (const match of apiMatches) {
-            const url = match[1].trim();
-            try {
-                const res = await fetch(url, { headers: { 'User-Agent': 'CyberPupBot/1.0' } });
-                if (res.ok) {
-                    const data = await res.text();
-                    text = text.replace(match[0], data.trim());
-                } else {
-                    text = text.replace(match[0], '[API Error]');
-                }
-            } catch (e) {
-                text = text.replace(match[0], '[API Fetch Failed]');
-            }
-        }
-    } // <--- End of customapi if-block
-
-    return text; // <--- MUST be inside parseVariables before closing brace below
-} // <--- END OF parseVariables
 
 async function main() {
     const startedAt = Date.now();
@@ -167,6 +85,29 @@ async function main() {
     }
 
     const chatClient = new ChatClient({ authProvider, channels: channelsToJoin });
+
+    // Trigger → Conditions → Actions engine. io.* abstracts Twurple so the
+    // engine stays testable; closures run after connect, so referencing
+    // chatClient/apiClient here is safe.
+    const engine = createAutomationEngine({ db, parseVariables, logEvent });
+    const automationIo = {
+        say: (channel, text) => chatClient.say(channel, text),
+        announce: async (cleanChannel, color, text) => {
+            const broadcaster = await apiClient.users.getUserByName(cleanChannel);
+            if (!broadcaster) throw new Error(`Couldn't find channel #${cleanChannel}.`);
+            await apiClient.asUser(botUserId, async (ctx) => {
+                await ctx.chat.sendAnnouncement(broadcaster.id, {
+                    message: text.slice(0, 500),
+                    color
+                });
+            });
+        },
+        isJoined: (cleanChannel) => {
+            const cur = chatClient.currentChannels;
+            if (!Array.isArray(cur)) return true;
+            return cur.some((c) => c.replace(/^#/, '').toLowerCase() === cleanChannel);
+        }
+    };
 
     chatClient.onMessage(async (channel, user, text, msg) => {
         const cleanChannel = channel.replace('#', '').toLowerCase();
@@ -355,6 +296,29 @@ async function main() {
         }
 
         // -------------------------------------------------------------
+        // AUTOMATIONS: trigger → conditions → actions
+        // Runs for every non-management message (fire-and-forget so action
+        // delays never block command responses). The bot's own messages are
+        // already filtered above, so automation output can't loop.
+        // -------------------------------------------------------------
+        {
+            const words = text.trim().split(/\s+/);
+            const commandName = (text.startsWith('!') || text.startsWith('$'))
+                ? words[0].slice(1).toLowerCase().replace(/^[$!]/, '') || null
+                : null;
+            engine.processMessage({
+                channel,
+                cleanChannel,
+                user,
+                cleanUser,
+                userLevel,
+                text,
+                args: commandName ? words.slice(1) : words,
+                commandName
+            }, automationIo).catch((e) => console.warn('[Automations]', e?.message || e));
+        }
+
+        // -------------------------------------------------------------
         // GENERAL CHAT COMMAND EXECUTION
         // -------------------------------------------------------------
         if (!text.startsWith('$') && !text.startsWith('!')) return;
@@ -408,6 +372,11 @@ async function main() {
     await chatClient.connect();
     console.log('[Bot] CyberPupBot connected to Twitch Chat.');
     logEvent('bot', 'Connected to Twitch chat');
+
+    // Automation timers (timer trigger type), evaluated every 15s.
+    setInterval(() => {
+        engine.processTimers(automationIo).catch((e) => console.warn('[Automations] timer tick:', e?.message || e));
+    }, 15000);
 }
 
 main().catch(console.error);

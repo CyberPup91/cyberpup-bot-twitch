@@ -20,6 +20,21 @@ db.exec(`
     last_used INTEGER DEFAULT 0,
     UNIQUE(channel, trigger)
   );
+
+  CREATE TABLE IF NOT EXISTS automations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    channel TEXT NOT NULL DEFAULT '*',
+    trigger_type TEXT NOT NULL,
+    trigger_config TEXT NOT NULL DEFAULT '{}',
+    conditions TEXT NOT NULL DEFAULT '{}',
+    actions TEXT NOT NULL DEFAULT '[]',
+    cooldown_sec INTEGER DEFAULT 0,
+    user_cooldown_sec INTEGER DEFAULT 0,
+    last_fired INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
 `);
 
 // Migration Helper: Explicitly add missing columns if upgrading an existing DB
@@ -34,5 +49,6 @@ function addColumnIfNotExists(table, columnDef) {
 addColumnIfNotExists('commands', 'userlevel INTEGER DEFAULT 0');
 addColumnIfNotExists('commands', 'cooldown INTEGER DEFAULT 5');
 addColumnIfNotExists('commands', 'last_used INTEGER DEFAULT 0');
+addColumnIfNotExists('automations', 'user_cooldown_sec INTEGER DEFAULT 0');
 
 export default db;

@@ -40,6 +40,7 @@
   #log .tag.bot { color: var(--acc); } #log .tag.command { color: #6fc3ff; }
   #log .tag.channel { color: var(--ok); } #log .tag.announce { color: #ffb84d; }
   #log .tag.error { color: var(--bad); } #log .tag.__hello { color: var(--dim); }
+  #log .tag.automation { color: #c792ea; }
   .muted { color: var(--dim); font-size: .85rem; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
@@ -97,6 +98,41 @@
   </section>
 
   <section class="card">
+    <h2>Automations <span class="muted" style="font-weight:400">trigger → conditions → actions</span></h2>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Name</th><th>Channel</th><th>Trigger</th><th>Actions</th><th>Cooldown</th><th>On</th><th></th></tr></thead>
+      <tbody id="auto-rows"></tbody>
+    </table>
+    </div>
+    <h3 id="auto-form-title" style="margin:18px 0 10px">New automation</h3>
+    <div class="row" style="margin-bottom:8px">
+      <div class="field"><label>Name</label><input id="auto-name" placeholder="Welcome message" autocomplete="off"></div>
+      <div class="field"><label>Channel</label><select id="auto-channel"></select></div>
+      <div class="field"><label>Trigger</label><select id="auto-trigger-type"></select></div>
+      <div class="field"><label>Enabled</label><input type="checkbox" id="auto-enabled" checked style="width:auto;margin-top:8px"></div>
+    </div>
+    <div id="auto-trigger-config" class="row" style="margin-bottom:8px"></div>
+    <div class="row" style="margin-bottom:8px">
+      <div class="field"><label>Min user level</label><select id="auto-min-level"></select></div>
+      <div class="field"><label>Only these users (comma separated)</label><input id="auto-allow" placeholder="alice, bob" autocomplete="off"></div>
+      <div class="field"><label>Never these users</label><input id="auto-deny" placeholder="troll123" autocomplete="off"></div>
+      <div class="field"><label>Cooldown, everyone (s)</label><input id="auto-cooldown" type="number" min="0" value="0"></div>
+      <div class="field"><label>Cooldown, per user (s)</label><input id="auto-ucooldown" type="number" min="0" value="0"></div>
+    </div>
+    <label>Actions (run in order)</label>
+    <div id="auto-actions" style="display:grid;gap:8px;margin:6px 0 8px"></div>
+    <div class="row" style="margin-bottom:12px">
+      <button class="ghost" id="auto-add-action">+ Add action</button>
+    </div>
+    <div class="row">
+      <button id="auto-save">Create automation</button>
+      <button class="ghost" id="auto-cancel" style="display:none">Cancel</button>
+    </div>
+    <p class="muted">Variables work in message text: <code>${user}</code> <code>${touser}</code> <code>${query}</code> <code>${1}</code> <code>${random.1-100}</code> <code>${weather}</code> <code>${customapi …}</code>. Announcements need the bot to be a mod. Timers need a specific channel.</p>
+  </section>
+
+  <section class="card">
     <h2>Live log <button class="ghost" id="clear-log" style="float:right">Clear</button></h2>
     <div id="log"></div>
   </section>
@@ -124,7 +160,7 @@ function fmtUptime(sec) {
 async function loadStatus() {
   try {
     const s = await api('/api/status');
-    $('status').textContent = `uptime ${fmtUptime(s.uptimeSec)} · ${s.channels} channel${s.channels === 1 ? '' : 's'} · ${s.commands} command${s.commands === 1 ? '' : 's'}`;
+    $('status').textContent = `uptime ${fmtUptime(s.uptimeSec)} · ${s.channels} channel${s.channels === 1 ? '' : 's'} · ${s.commands} command${s.commands === 1 ? '' : 's'} · ${s.automations || 0} automation${(s.automations || 0) === 1 ? '' : 's'}`;
     $('bot-info').innerHTML = `Logged in as <strong>${esc(s.botName)}</strong>`;
   } catch { $('status').textContent = 'status unavailable'; }
 }
@@ -137,6 +173,9 @@ async function loadChannels() {
   const opts = channels.map((c) => `<option value="${esc(c.name)}">#${esc(c.name)}</option>`).join('');
   $('filter-channel').innerHTML = `<option value="">All channels</option>${opts}`;
   $('add-channel').innerHTML = opts || '<option value="">—</option>';
+  const prevAutoChan = $('auto-channel').value || '*';
+  $('auto-channel').innerHTML = `<option value="*">All channels</option>${opts}`;
+  if ([...$('auto-channel').options].some((o) => o.value === prevAutoChan)) $('auto-channel').value = prevAutoChan;
   document.querySelectorAll('[data-part]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm(`Part #${b.dataset.part}?`)) return;
@@ -180,7 +219,169 @@ async function loadCommands() {
   });
 }
 
-async function refreshAll() { await loadStatus(); await loadChannels(); await loadCommands(); }
+async function refreshAll() { await loadStatus(); await loadChannels(); await loadCommands(); await loadAutomations(); }
+
+// ---------- Automations (trigger → conditions → actions) ----------
+let AUTO_META = null;
+let editingAutoId = null;
+
+function renderTriggerConfig(cfg = {}) {
+  const type = $('auto-trigger-type').value;
+  let html = '';
+  if (type === 'keyword') {
+    html = `<div class="field"><label>Match</label><select id="atc-match">`
+      + ['contains', 'equals', 'starts_with'].map((m) => `<option value="${m}"${cfg.match === m ? ' selected' : ''}>${m.replace('_', ' ')}</option>`).join('')
+      + `</select></div>
+      <div class="field" style="flex:1;min-width:200px"><label>Text</label><input id="atc-text" value="${esc(cfg.text || '')}" placeholder="hello" autocomplete="off"></div>`;
+  } else if (type === 'regex') {
+    html = `<div class="field" style="flex:1;min-width:200px"><label>Pattern</label><input id="atc-pattern" value="${esc(cfg.pattern || '')}" placeholder="\\bhello\\b" autocomplete="off"></div>
+      <div class="field"><label>Flags</label><select id="atc-flags"><option value="">none</option><option value="i"${cfg.flags === 'i' ? ' selected' : ''}>i (ignore case)</option></select></div>`;
+  } else if (type === 'command') {
+    html = `<div class="field"><label>Command (without !)</label><input id="atc-name" value="${esc(cfg.name || '')}" placeholder="hug" autocomplete="off"></div>
+      <p class="muted">Fires when someone uses this command, alongside any custom command with the same name.</p>`;
+  } else if (type === 'timer') {
+    html = `<div class="field"><label>Every (seconds, min 30)</label><input id="atc-interval" type="number" min="30" value="${esc(cfg.interval_sec ?? 300)}"></div>
+      <div class="field"><label>Min chat messages between fires</label><input id="atc-minmsgs" type="number" min="0" value="${esc(cfg.min_messages ?? 0)}"></div>
+      <p class="muted">Timers need a specific channel (not "All channels").</p>`;
+  }
+  $('auto-trigger-config').innerHTML = html;
+}
+
+function actionFieldsHTML(type, a = {}) {
+  if (type === 'announce') {
+    const colors = (AUTO_META?.announce_colors || ['primary'])
+      .map((c) => `<option value="${c}"${a.color === c ? ' selected' : ''}>${c}</option>`).join('');
+    return `<select data-af="color">${colors}</select><input data-af="text" style="flex:1;min-width:200px" placeholder="Announcement text" value="${esc(a.text || '')}" autocomplete="off">`;
+  }
+  if (type === 'delay') {
+    return `<span class="muted">wait</span><input data-af="ms" type="number" min="0" max="60000" value="${esc(a.ms ?? 1000)}" style="width:110px"><span class="muted">ms</span>`;
+  }
+  return `<input data-af="text" style="flex:1;min-width:200px" placeholder="Message text (variables OK)" value="${esc(a.text || '')}" autocomplete="off">`;
+}
+
+function addActionRow(preset = {}) {
+  const type = preset.type || 'message';
+  const div = document.createElement('div');
+  div.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#12141a;border:1px solid var(--line);border-radius:8px;padding:8px';
+  const typeOpts = AUTO_META.action_types
+    .map((t) => `<option value="${t.id}"${t.id === type ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
+  div.innerHTML = `<select data-af="type">${typeOpts}</select>`
+    + `<span data-af-fields style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1"></span>`
+    + `<button class="ghost" data-aup title="move up">↑</button>`
+    + `<button class="ghost" data-adown title="move down">↓</button>`
+    + `<button class="danger" data-adel title="remove">✕</button>`;
+  const render = () => {
+    div.querySelector('[data-af-fields]').innerHTML =
+      actionFieldsHTML(div.querySelector('[data-af="type"]').value, preset);
+  };
+  div.querySelector('[data-af="type"]').onchange = () => { preset = {}; render(); };
+  div.querySelector('[data-adel]').onclick = () => div.remove();
+  div.querySelector('[data-aup]').onclick = () => { if (div.previousElementSibling) div.parentNode.insertBefore(div, div.previousElementSibling); };
+  div.querySelector('[data-adown]').onclick = () => { if (div.nextElementSibling) div.parentNode.insertBefore(div.nextElementSibling, div); };
+  render();
+  $('auto-actions').appendChild(div);
+}
+
+function collectAutomation() {
+  const type = $('auto-trigger-type').value;
+  const cfg = {};
+  if (type === 'keyword') { cfg.match = $('atc-match').value; cfg.text = $('atc-text').value; }
+  else if (type === 'regex') { cfg.pattern = $('atc-pattern').value; cfg.flags = $('atc-flags').value; }
+  else if (type === 'command') { cfg.name = $('atc-name').value; }
+  else if (type === 'timer') { cfg.interval_sec = $('atc-interval').value; cfg.min_messages = $('atc-minmsgs').value; }
+  const actions = [];
+  document.querySelectorAll('#auto-actions [data-af="type"]').forEach((sel) => {
+    const row = sel.closest('div');
+    const t = sel.value;
+    if (t === 'announce') actions.push({ type: t, color: row.querySelector('[data-af="color"]').value, text: row.querySelector('[data-af="text"]').value });
+    else if (t === 'delay') actions.push({ type: t, ms: row.querySelector('[data-af="ms"]').value });
+    else actions.push({ type: t, text: row.querySelector('[data-af="text"]').value });
+  });
+  const splitUsers = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
+  return {
+    name: $('auto-name').value,
+    channel: $('auto-channel').value,
+    enabled: $('auto-enabled').checked,
+    trigger_type: type,
+    trigger_config: cfg,
+    conditions: {
+      min_level: $('auto-min-level').value,
+      allow_users: splitUsers($('auto-allow').value),
+      deny_users: splitUsers($('auto-deny').value),
+    },
+    actions,
+    cooldown_sec: $('auto-cooldown').value,
+    user_cooldown_sec: $('auto-ucooldown').value,
+  };
+}
+
+function resetAutoForm() {
+  editingAutoId = null;
+  $('auto-form-title').textContent = 'New automation';
+  $('auto-save').textContent = 'Create automation';
+  $('auto-cancel').style.display = 'none';
+  $('auto-name').value = '';
+  $('auto-channel').value = '*';
+  $('auto-enabled').checked = true;
+  $('auto-trigger-type').value = 'keyword';
+  renderTriggerConfig();
+  $('auto-min-level').value = 0;
+  $('auto-allow').value = ''; $('auto-deny').value = '';
+  $('auto-cooldown').value = 0; $('auto-ucooldown').value = 0;
+  $('auto-actions').innerHTML = '';
+  addActionRow();
+}
+
+function editAutomation(a) {
+  if (!a) return;
+  editingAutoId = a.id;
+  $('auto-form-title').textContent = 'Edit automation: ' + a.name;
+  $('auto-save').textContent = 'Save changes';
+  $('auto-cancel').style.display = '';
+  $('auto-name').value = a.name;
+  $('auto-channel').value = a.channel;
+  $('auto-enabled').checked = !!a.enabled;
+  $('auto-trigger-type').value = a.trigger_type;
+  renderTriggerConfig(a.trigger_config || {});
+  $('auto-min-level').value = a.conditions?.min_level ?? 0;
+  $('auto-allow').value = (a.conditions?.allow_users || []).join(', ');
+  $('auto-deny').value = (a.conditions?.deny_users || []).join(', ');
+  $('auto-cooldown').value = a.cooldown_sec ?? 0;
+  $('auto-ucooldown').value = a.user_cooldown_sec ?? 0;
+  $('auto-actions').innerHTML = '';
+  (a.actions || []).forEach((x) => addActionRow(x));
+  $('auto-form-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function loadAutomations() {
+  const rows = await api('/api/automations');
+  $('auto-rows').innerHTML = rows.length ? rows.map((r) => `
+    <tr data-id="${r.id}">
+      <td><strong>${esc(r.name)}</strong></td>
+      <td class="chan">${r.channel === '*' ? 'all' : '#' + esc(r.channel)}</td>
+      <td class="muted">${esc(r.trigger_summary || r.trigger_type)}</td>
+      <td class="muted">${r.actions.length} action${r.actions.length === 1 ? '' : 's'}</td>
+      <td class="muted">${r.cooldown_sec > 0 ? esc(r.cooldown_sec) + 's' : '—'}</td>
+      <td><input type="checkbox" data-f="enabled"${r.enabled ? ' checked' : ''} style="width:auto"></td>
+      <td class="actions"><button data-edit>Edit</button><button class="danger" data-del>Delete</button></td>
+    </tr>`).join('')
+    : `<tr><td colspan="7" class="muted">No automations yet. Build your first trigger → conditions → actions flow below.</td></tr>`;
+  document.querySelectorAll('#auto-rows tr[data-id]').forEach((tr) => {
+    const id = tr.dataset.id;
+    const cur = rows.find((x) => String(x.id) === String(id));
+    tr.querySelector('[data-f="enabled"]').onchange = async (e) => {
+      await api(`/api/automations/${id}`, { method: 'PUT', body: JSON.stringify({ ...cur, enabled: e.target.checked }) });
+      loadStatus();
+    };
+    tr.querySelector('[data-edit]').onclick = () => editAutomation(cur);
+    tr.querySelector('[data-del]').onclick = async () => {
+      if (!confirm('Delete this automation?')) return;
+      await api(`/api/automations/${id}`, { method: 'DELETE' });
+      if (String(editingAutoId) === String(id)) resetAutoForm();
+      loadAutomations(); loadStatus();
+    };
+  });
+}
 
 function addLog(entry) {
   const el = $('log');
@@ -205,6 +406,22 @@ async function init() {
   const meta = await api('/api/meta');
   LEVELS = meta.levels;
   $('add-level').innerHTML = levelOptions(0);
+  AUTO_META = await api('/api/automation-meta');
+  $('auto-trigger-type').innerHTML = AUTO_META.trigger_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  $('auto-min-level').innerHTML = levelOptions(0);
+  $('auto-trigger-type').onchange = () => renderTriggerConfig();
+  $('auto-add-action').onclick = () => addActionRow();
+  $('auto-cancel').onclick = resetAutoForm;
+  $('auto-save').onclick = async () => {
+    const body = collectAutomation();
+    try {
+      if (editingAutoId) await api(`/api/automations/${editingAutoId}`, { method: 'PUT', body: JSON.stringify(body) });
+      else await api('/api/automations', { method: 'POST', body: JSON.stringify(body) });
+      resetAutoForm();
+      loadAutomations(); loadStatus();
+    } catch (e) { alert('Could not save automation: ' + e.message); }
+  };
+  resetAutoForm();
   $('join-btn').onclick = async () => {
     const name = $('join-name').value.trim();
     if (!name) return;
